@@ -266,6 +266,10 @@ DEDICATED_HOST_IMAGE_TAG=edge
    See `.env.example`'s "Dedicated hosts" block and [docs/dedicated-hosts.md](./dedicated-hosts.md)
    for the full variable list, including how to look up `CONTABO_PRODUCT_ID` and
    `CONTABO_IMAGE_ID` with `pnpm tsx scripts/contabo-catalog.ts`.
+
+   If no public `computer` and `supervisor` images exist yet, `infra/dedicated-host/setup-tunnel-registry.sh`
+   serves them from the control plane over the tunnel instead — see [Serving images from the control
+   plane](./dedicated-hosts.md#serving-images-from-the-control-plane-no-public-registry).
 4. Start the stack, then verify it. The clone above is the distribution repository, which has no
    application source, so set the published tags in `.env` and pull rather than build:
 

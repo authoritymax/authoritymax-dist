@@ -122,6 +122,39 @@ repository there. The packages must be pullable anonymously (public) or the host
 `COMPUTE_HOST_PROVIDER=fake` provisions in-memory hosts for development and tests; nothing is
 created anywhere.
 
+### Serving images from the control plane (no public registry)
+
+GHCR is the default: hosts pull the public `computer` and `supervisor` images from
+`authoritymax-dist`. Use this alternative only when no published images exist yet — a private fork,
+or a control plane standing up before CI has ever run.
+
+```bash
+sudo bash infra/dedicated-host/setup-tunnel-registry.sh
+```
+
+Run it on the control plane after `setup-control-plane.sh`. It starts a `registry:2` container
+published **only** on the tunnel address, builds both images from the checkout, pushes them, and
+prints the two values to set:
+
+```env
+DEDICATED_HOST_IMAGE_REPOSITORY=10.77.0.1:5000/authoritymax
+DEDICATED_HOST_IMAGE_TAG=local
+```
+
+`DEDICATED_HOST_CONTROL_PLANE_ADDRESS`, `REGISTRY_PORT`, `AUTHORITYMAX_DEPLOY_DIR`, and `IMAGE_TAG`
+override the defaults. Re-run it after changing either image; the script is idempotent.
+
+The registry speaks plain HTTP, so the control plane and every dedicated host get an
+`insecure-registries` entry for that one tunnel address — added by merging into
+`/etc/docker/daemon.json` here, and written into cloud-init on each host. Nothing is weakened for
+any other registry, and the traffic never leaves WireGuard: the container is published on the
+tunnel address rather than `0.0.0.0`, and UFW allows the port on `wg0` only. The registry is
+unauthenticated, so reaching it at all requires the tunnel — check `docker port
+authoritymax-registry` if you ever need to confirm what it is bound to.
+
+Switching back to GHCR is just restoring `DEDICATED_HOST_IMAGE_REPOSITORY` and recreating `api` and
+`worker`; hosts provisioned earlier keep pulling from wherever their cloud-init pointed them.
+
 ## Operations
 
 - **Status.** `dedicated_hosts.status` moves `pending → provisioning → ready`; `error` keeps
