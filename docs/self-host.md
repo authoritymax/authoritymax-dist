@@ -42,10 +42,32 @@ AGENT_RUNTIME=pi          # Keep scripted only for pnpm test.
 WAKEUP_DRIVER=graphile
 SANDBOX_IDLE_MS=600000    # pause the bot computer after 10 minutes idle
 SANDBOX_COMMAND_TIMEOUT_MS=300000 # stop a shell command after 5 minutes
+# Time limits below are optional (defaults shown, 0 disables): they stop a run from
+# staying "working" forever when a model or the computer stops answering.
+MODEL_RESPONSE_TIMEOUT_MS=90000   # model must answer with response headers in time
+RUN_IDLE_TIMEOUT_MS=600000        # fail a turn after 10 minutes with no model activity
+RUN_MAX_DURATION_MS=7200000       # hard ceiling on one run attempt (2 hours)
+SANDBOX_REQUEST_TIMEOUT_MS=30000  # supervisor control calls (files, input, stop)
+SANDBOX_PROVISION_TIMEOUT_MS=120000 # provisioning: image pull, container start, screen
+SANDBOX_SCREEN_TIMEOUT_MS=20000   # observe/screen calls; action batches add their waits
+SANDBOX_EXEC_GRACE_MS=15000       # added to a command's timeout for the exec round trip
 MAX_TOOL_CALLS_PER_TURN=  # optional Pi turn tool-call fuse; unset/0 = unlimited
 E2B_API_KEY=              # when SANDBOX_PROVIDER=e2b
 DAYTONA_API_KEY=          # when SANDBOX_PROVIDER=daytona
 BOX_API_KEY=              # when SANDBOX_PROVIDER=box
+```
+
+### Account email (password reset)
+
+"Forgot password?" only appears once an email provider is configured; without one, users can still
+change their password from Settings while signed in. Reset links point at `WEB_ORIGIN/reset-password`
+and expire after an hour.
+
+```env
+EMAIL_PROVIDER=smtp       # smtp | resend | console (console prints the mail to the API log; dev only)
+EMAIL_FROM=AuthorityMax <no-reply@example.com>
+SMTP_URL=smtp://user:password@mail.example.com:587   # when EMAIL_PROVIDER=smtp (smtps:// for implicit TLS)
+RESEND_API_KEY=           # when EMAIL_PROVIDER=resend
 ```
 
 To use an operator-controlled OpenAI-compatible server such as Ollama, LM Studio, llama.cpp, or
@@ -73,6 +95,12 @@ only to public addresses; redirects and DNS answers that reach private or link-l
 rejected.
 
 Do not commit `.env`. Never put `COMPOSIO_API_KEY`, OpenRouter keys, or provider tokens in git, logs, or chat.
+
+## Choosing which apps Integrations offers
+
+Integrations lists only the apps enabled for this deployment, not the connector provider's whole directory. With Composio, an app is enabled when its toolkit has at least one enabled auth config in your Composio project (what you set up under Integrations in the Composio dashboard; read through `GET /api/v3/auth_configs`). Apps a user already connected stay listed. A project with nothing enabled yet offers the featured apps (Gmail, Google Calendar, Google Drive, Slack, Notion) so the screen is not empty. The enabled set is cached for an hour, like the app directory.
+
+To narrow the list further, set `INTEGRATIONS_ALLOWLIST` to comma-separated app slugs, for example `INTEGRATIONS_ALLOWLIST=gmail,google-calendar,slack`. Matching ignores case and separators, and the allowlist applies to every managed connector provider. It only restricts; it cannot offer an app the provider has not enabled. Search on the Integrations screen only looks within the offered apps. MCP, OpenAPI, and Treg tool sources under Advanced are not affected.
 
 ## Choosing a computer provider
 
@@ -516,6 +544,9 @@ To run a hosted product (same codebase):
 9. Deploy `apps/www` to your public website and point `app.example.com` (or similar) at the product origin.
 10. Turn on `SIGNUP_ALLOWLIST` until you want open registration. There is no AuthorityMax-managed model billing in version 1 — users bring keys.
 
-Expo / desktop installers are clients of that origin (`EXPO_PUBLIC_API_URL`, `AUTHORITYMAX_WEB_URL`). They are not a Cloud control plane.
+Expo / desktop installers are clients of that origin. Both default to the hosted service (`https://bots.authoritymax.ai`) so a fresh install connects with no configuration, and web deploys reach installed desktop apps immediately because the desktop app loads the web UI straight from the server.
 
-The iOS and Android app can also point at a self-hosted origin at runtime. On the sign-in screen, tap **Use a custom server** and enter the same HTTPS origin as `WEB_ORIGIN` (for example `https://app.example.com`). Store builds still default to `EXPO_PUBLIC_API_URL`; the in-app setting is an override for people running their own API. Changing the server signs the device out of any previous session.
+Self-hosters point the clients at their own origin:
+
+- **Desktop.** Open **Change AuthorityMax Server…** (⌘/Ctrl+Shift+K), choose **Custom server URL**, and enter your origin. `AUTHORITYMAX_WEB_URL` overrides the target for a single launch without changing the saved choice. Set `AUTHORITYMAX_BUNDLED_RENDERER=1` to serve the web build packaged inside the app instead of loading it from the server (useful for fully offline or air-gapped installs); it is off by default.
+- **Mobile.** On the sign-in screen, tap **Use a custom server** and enter the same HTTPS origin as `WEB_ORIGIN` (for example `https://app.example.com`). Store builds default to `EXPO_PUBLIC_API_URL` when it is set at build time, otherwise the hosted service; the in-app setting is a per-device override. Changing the server signs the device out of any previous session.
