@@ -129,8 +129,13 @@ and conservative kernel/network protections. Keep the provider console open unti
 succeeds after the script reloads SSH.
 
 ```bash
-sudo DEPLOY_USER=deploy bash infra/compose/harden-host.sh
+sudo DEPLOY_USER=deploy FAIL2BAN_IGNORE_IPS="203.0.113.10" bash infra/compose/harden-host.sh
 ```
+
+Set `FAIL2BAN_IGNORE_IPS` to your own address (space- or comma-separated, IPv4/IPv6, CIDR allowed) so
+you can never be banned from your own host — a handful of connection probes while sshd restarts is
+enough to trip the jail, and the ban time doubles each repeat. If it does happen, unban from another
+machine with `sudo fail2ban-client set sshd unbanip <ip>`.
 
 The production host also uses `infra/compose/docker-daemon.json` to enable live restore, bounded local
 container logs, default no-new-privileges, and the kernel NAT path instead of Docker's userland proxy.

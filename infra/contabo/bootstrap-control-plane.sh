@@ -14,6 +14,7 @@
 #   AUTHORITYMAX_REPO_URL           repository to clone
 #   AUTHORITYMAX_GIT_REF            branch or tag to check out (default: main)
 #   AUTHORITYMAX_DEPLOY_DIR         checkout location (default: /srv/authoritymax)
+#   FAIL2BAN_IGNORE_IPS             addresses fail2ban must never ban; set it to your own
 
 set -Eeuo pipefail
 
@@ -175,7 +176,8 @@ fi
 # --- Hardening --------------------------------------------------------------
 
 echo "==> Hardening the host"
-DEPLOY_USER="${DEPLOY_USER}" bash "${DEPLOY_DIR}/infra/compose/harden-host.sh"
+DEPLOY_USER="${DEPLOY_USER}" FAIL2BAN_IGNORE_IPS="${FAIL2BAN_IGNORE_IPS:-}" \
+  bash "${DEPLOY_DIR}/infra/compose/harden-host.sh"
 
 # --- Backups ----------------------------------------------------------------
 

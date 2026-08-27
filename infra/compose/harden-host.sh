@@ -4,9 +4,14 @@ set -Eeuo pipefail
 
 DEPLOY_USER="${DEPLOY_USER:-deploy}"
 SSH_PORT="${SSH_PORT:-22}"
+# Space- or comma-separated addresses fail2ban must never ban. Set it to your own address: a few
+# connection probes while sshd restarts can otherwise be enough to lock you out of your own host,
+# and the ban time doubles on each repeat.
+FAIL2BAN_IGNORE_IPS="${FAIL2BAN_IGNORE_IPS:-}"
 
 if [[ "${EUID}" -ne 0 ]]; then
-  exec sudo --preserve-env=DEPLOY_USER,SSH_PORT,DEDICATED_HOST_WG_PORT bash "$0" "$@"
+  exec sudo --preserve-env=DEPLOY_USER,SSH_PORT,DEDICATED_HOST_WG_PORT,FAIL2BAN_IGNORE_IPS \
+    bash "$0" "$@"
 fi
 
 if ! id "${DEPLOY_USER}" >/dev/null 2>&1; then
@@ -56,11 +61,36 @@ EOF
 chmod 600 /etc/ssh/sshd_config.d/99-authoritymax-hardening.conf
 sshd -t
 
+# fail2ban's default ignoreip is exactly these two, so an unset FAIL2BAN_IGNORE_IPS changes nothing.
+IGNORE_IPS="127.0.0.1/8 ::1"
+if [[ -n "${FAIL2BAN_IGNORE_IPS}" ]]; then
+  IPV4_RE='((25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(/(3[0-2]|[12]?[0-9]))?'
+  IPV6_RE='[0-9A-Fa-f:]{2,45}(/(12[0-8]|1[01][0-9]|[1-9]?[0-9]))?'
+  read -r -a IGNORE_ENTRIES <<<"${FAIL2BAN_IGNORE_IPS//,/ }"
+  for entry in "${IGNORE_ENTRIES[@]}"; do
+    # Validated rather than trusted: this lands in a config file, and one bad token would either
+    # be silently ignored by fail2ban or break the jail that is protecting SSH.
+    if [[ "${entry}" =~ ^${IPV4_RE}$ ]]; then
+      :
+    elif [[ "${entry}" == *:* && "${entry}" =~ ^${IPV6_RE}$ ]]; then
+      :
+    else
+      echo "FAIL2BAN_IGNORE_IPS: '${entry}' is not an IPv4/IPv6 address or CIDR range" >&2
+      exit 1
+    fi
+    IGNORE_IPS+=" ${entry}"
+  done
+fi
+
 # backend = systemd needs python3-systemd, which --no-install-recommends leaves out above.
 cat >/etc/fail2ban/jail.d/sshd.local <<EOF
 [sshd]
 enabled = true
 backend = systemd
+# normal counts authentication failures only; the noisier modes also count connections that close
+# without authenticating, which is what a port probe or a restarting sshd looks like.
+mode = normal
+ignoreip = ${IGNORE_IPS}
 port = ${SSH_PORT}
 maxretry = 3
 findtime = 10m
