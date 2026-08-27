@@ -391,8 +391,11 @@ The updater resolves the newest stable `vX.Y.Z` source tag but deploys its `sha-
 not `latest` or a moving minor tag. A registry tag is not an OCI digest and GHCR package writers can
 replace it, so the trust boundary remains this repository's publishing credentials. The workflow
 reduces that boundary by using SHA-pinned actions, read-only pull-request jobs, digest-pinned base
-images, SBOM/provenance output, and a GitHub build attestation. Operators who require registry-level
-content addressing can pin `AUTHORITYMAX_IMAGE` outside the automatic updater to a verified digest.
+images, SBOM/provenance output, and a GitHub build attestation. GitHub persists attestations for a
+private source repository only on a paid plan; a fork publishing from a free-plan organization sets the
+`IMAGE_ATTESTATIONS` repository variable to `false` to skip that one step and keep the rest. Operators
+who require registry-level content addressing can pin `AUTHORITYMAX_IMAGE` outside the automatic updater
+to a verified digest.
 
 Rollback never contacts the registry: it redeploys the previous tag from the local Docker cache,
 so a later tag move cannot change rollback content. Do not prune the previous application image
