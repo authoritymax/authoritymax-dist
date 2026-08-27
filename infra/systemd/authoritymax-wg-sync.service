@@ -1,0 +1,18 @@
+[Unit]
+Description=Apply AuthorityMax dedicated-host WireGuard peers to wg0
+Requires=wg-quick@wg0.service
+After=wg-quick@wg0.service docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/authoritymax-wg-sync
+RuntimeDirectory=authoritymax-wg
+RuntimeDirectoryMode=0700
+Nice=5
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+NoNewPrivileges=true
+# The peer directory is discovered through the Docker socket; the rest of the tree stays read-only.
+ReadWritePaths=-/run/docker.sock

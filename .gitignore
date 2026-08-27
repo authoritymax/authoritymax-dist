@@ -1,0 +1,7 @@
+# Managed by scripts/sync-dist.sh in the source repository. Local edits are overwritten.
+.env
+.env.*
+!.env.example
+data/
+backups/
+*.log

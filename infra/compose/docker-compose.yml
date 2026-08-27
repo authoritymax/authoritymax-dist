@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: authoritymax
+      POSTGRES_PASSWORD: authoritymax
+      POSTGRES_DB: authoritymax
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authoritymax"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  supervisor:
+    build:
+      context: ../..
+      dockerfile: infra/sandboxes/supervisor/Dockerfile
+    env_file:
+      - ../../.env
+    environment:
+      DATA_DIR: /data
+      SUPERVISOR_HOST: "0.0.0.0"
+      SUPERVISOR_PORT: "7091"
+      DOCKER_SOCKET: /var/run/docker.sock
+      AUTHORITYMAX_COMPUTER_IMAGE: authoritymax/computer:local
+      SANDBOX_SCREEN_NETWORK: internal
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ../../data:/data
+    depends_on:
+      computer:
+        condition: service_completed_successfully
+
+  computer:
+    image: authoritymax/computer:local
+    build:
+      context: ../sandboxes/computer
+    command: ["true"]
+    restart: "no"
+
+  data-init:
+    image: busybox:1
+    command: ["chown", "-R", "1000:1000", "/data"]
+    restart: "no"
+    volumes:
+      - ../../data:/data
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile
+    command: ["bash", "-lc", "pnpm --filter @authoritymax/db exec prisma migrate deploy && pnpm --filter @authoritymax/api start"]
+    env_file:
+      - ../../.env
+    environment:
+      DATABASE_URL: postgres://authoritymax:authoritymax@postgres:5432/authoritymax
+      DATA_DIR: /data
+      SANDBOX_SUPERVISOR_URL: http://supervisor:7091
+      WAKEUP_DRIVER: graphile
+      SANDBOX_PROVIDER: docker
+      AGENT_RUNTIME: pi
+    ports:
+      - "3100:3100"
+    volumes:
+      - ../../data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-init:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile
+    command: ["pnpm", "--filter", "@authoritymax/worker", "start"]
+    env_file:
+      - ../../.env
+    environment:
+      DATABASE_URL: postgres://authoritymax:authoritymax@postgres:5432/authoritymax
+      DATA_DIR: /data
+      SANDBOX_SUPERVISOR_URL: http://supervisor:7091
+      WAKEUP_DRIVER: graphile
+      SANDBOX_PROVIDER: docker
+      AGENT_RUNTIME: pi
+    volumes:
+      - ../../data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      data-init:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: ../..
+      dockerfile: infra/compose/Dockerfile
+    command: ["pnpm", "--filter", "@authoritymax/web", "preview", "--host", "0.0.0.0", "--port", "5173"]
+    environment:
+      API_PROXY_TARGET: http://api:3100
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      AUTHORITYMAX_HOST: ${AUTHORITYMAX_HOST:-localhost}
+    ports:
+      - "5173:5173"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
