@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     procps \
     bash \
+    tar \
     chromium \
     fonts-liberation \
     fonts-dejavu-core \

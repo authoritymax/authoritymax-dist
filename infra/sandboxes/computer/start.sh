@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
+# Browser subprocess crashes would otherwise leave multi-MB core.* files in the workspace.
+ulimit -c 0 2>/dev/null || true
 export DISPLAY="${DISPLAY:-:1}"
 export HOME="${HOME:-/home/authoritymax}"
 AGENT_HOME="$HOME"
