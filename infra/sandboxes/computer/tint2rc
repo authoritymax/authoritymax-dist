@@ -1,0 +1,61 @@
+# AuthorityMax launcher bar — dark, 36 px, bottom. Tokens mirror packages/ui-tokens.
+# Backgrounds first: tint2 parses sequentially and ids only exist once declared.
+
+# background 1: panel
+rounded = 0
+border_width = 0
+background_color = #111113 100
+border_color = #111113 0
+
+# background 2: active task
+rounded = 6
+border_width = 0
+background_color = #3ec5a8 22
+border_color = #3ec5a8 0
+
+panel_items = LTC
+panel_size = 100% 36
+panel_position = bottom center horizontal
+panel_layer = top
+strut_policy = follow_size
+panel_dock = 0
+panel_monitor = all
+panel_background_id = 1
+panel_padding = 6 0 6
+
+launcher_padding = 4 4 8
+launcher_background_id = 0
+launcher_icon_size = 24
+launcher_icon_theme = AdwaitaLegacy
+launcher_icon_theme_override = 0
+launcher_tooltip = 1
+launcher_item_app = /usr/share/applications/authoritymax-browser.desktop
+launcher_item_app = /usr/share/applications/authoritymax-files.desktop
+launcher_item_app = /usr/share/applications/authoritymax-terminal.desktop
+
+taskbar_mode = single_desktop
+taskbar_padding = 6 2 6
+taskbar_background_id = 0
+task_text = 1
+task_icon = 1
+task_centered = 0
+task_maximum_size = 200 30
+task_padding = 8 2 8
+task_font = Sans 9
+task_font_color = #c8c9d0 100
+task_background_id = 0
+task_active_background_id = 2
+task_active_font_color = #ffffff 100
+urgent_nb_of_blink = 6
+
+time1_format = %H:%M
+time1_font = Sans 9
+clock_font_color = #c8c9d0 100
+clock_padding = 10 0
+clock_background_id = 0
+
+tooltip_show_timeout = 0.4
+tooltip_font = Sans 9
+tooltip_background_id = 1
+tooltip_font_color = #e8e8ea 100
+tooltip_padding = 6 4

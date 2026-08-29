@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Browser
+Icon=authoritymax-browser
+Exec=/usr/local/bin/authoritymax-browser %U
+Terminal=false
+MimeType=text/html;text/plain;text/markdown;text/csv;application/json;application/pdf;image/png;image/jpeg;image/gif;image/webp;image/svg+xml;x-scheme-handler/http;x-scheme-handler/https;
+NoDisplay=true

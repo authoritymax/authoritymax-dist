@@ -1,0 +1,15 @@
+[Default Applications]
+inode/directory=pcmanfm.desktop
+text/html=authoritymax-browser.desktop
+text/plain=authoritymax-browser.desktop
+text/markdown=authoritymax-browser.desktop
+text/csv=authoritymax-browser.desktop
+application/json=authoritymax-browser.desktop
+application/pdf=authoritymax-browser.desktop
+image/png=authoritymax-browser.desktop
+image/jpeg=authoritymax-browser.desktop
+image/gif=authoritymax-browser.desktop
+image/webp=authoritymax-browser.desktop
+image/svg+xml=authoritymax-browser.desktop
+x-scheme-handler/http=authoritymax-browser.desktop
+x-scheme-handler/https=authoritymax-browser.desktop

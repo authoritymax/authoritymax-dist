@@ -2,18 +2,21 @@
 set -eu
 AUTHORITYMAX_HOME="${HOME:-/home/authoritymax}"
 PROFILE="$AUTHORITYMAX_HOME/.browser-profiles/chromium"
-mkdir -p "$PROFILE"
-BIN="$(command -v chromium || command -v chromium-browser || true)"
+BIN=""
+for candidate in google-chrome-stable google-chrome chromium chromium-browser; do
+  if BIN="$(command -v "$candidate" 2>/dev/null)"; then break; fi
+  BIN=""
+done
 if [ -z "$BIN" ]; then
-  echo "chromium is not installed" >&2
+  echo "no browser is installed (expected google-chrome-stable or chromium)" >&2
   exit 1
 fi
-exec "$BIN" \
+set -- "$BIN" \
   --test-type \
   --no-sandbox \
   --disable-dev-shm-usage \
-  --disable-gpu \
-  --disable-software-rasterizer \
+  --ozone-platform=x11 \
+  --enable-unsafe-swiftshader \
   --no-first-run \
   --no-default-browser-check \
   --disable-session-crashed-bubble --hide-crash-restore-bubble \
@@ -21,3 +24,10 @@ exec "$BIN" \
   --user-data-dir="$PROFILE" \
   --start-maximized \
   "$@"
+# Print mode is a dry run for tests and callers that only need the argv: touch nothing.
+if [ "${AUTHORITYMAX_BROWSER_PRINT:-}" = "1" ]; then
+  for arg in "$@"; do printf '%s\n' "$arg"; done
+  exit 0
+fi
+mkdir -p "$PROFILE"
+exec "$@"

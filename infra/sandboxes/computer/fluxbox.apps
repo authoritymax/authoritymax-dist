@@ -12,4 +12,10 @@
 [end]
 [app] (class=XTerm)
   [Maximized] {no}
+  [Layer] {Normal}
+[end]
+[app] (class=Pcmanfm)
+  [Maximized] {no}
+  [Dimensions] {900 600}
+  [Position] (CENTER) {0 0}
 [end]

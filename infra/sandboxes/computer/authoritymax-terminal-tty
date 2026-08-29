@@ -1,0 +1,57 @@
+#!/bin/sh
+# Prints the tty of the persistent terminal pane for a display, creating the tmux
+# session and (re)attaching an xterm to it when missing. Exit 1 when no display works.
+# Reentrant: overlapping callers share one session and one xterm.
+set -u
+DISPLAY_ARG="${1:-${DISPLAY:-:1}}"
+NUM="${DISPLAY_ARG#:}"
+case "$NUM" in '' | *[!0-9]*) exit 1 ;; esac
+SESSION="screen-$NUM"
+CACHE="/tmp/authoritymax/terminal-tty-$NUM"
+LOCK="/tmp/authoritymax/terminal-$NUM.lock"
+mkdir -p /tmp/authoritymax
+export DISPLAY="$DISPLAY_ARG"
+export HOME="${HOME:-/home/authoritymax}"
+
+# xdotool search takes one pattern, so class and title are matched in two steps: the class
+# keeps a file manager window titled "Terminal" from passing, and there is no --onlyvisible
+# so a minimized window still counts (else every launcher click would stack another xterm).
+terminal_window() {
+  for win in $(xdotool search --class '^XTerm$' 2>/dev/null); do
+    if [ "$(xdotool getwindowname "$win" 2>/dev/null)" = "Terminal" ]; then
+      printf '%s\n' "$win"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# A concurrent caller may create the session between the check and the create, so the
+# duplicate-session failure is ignored and the session is confirmed by a second check.
+# (-A is not an option here: it turns the create into an attach, which fails without a tty.)
+if ! tmux -L am has-session -t "$SESSION" 2>/dev/null; then
+  tmux -L am new-session -d -s "$SESSION" -x 110 -y 30 \
+    "env PS1='\\$ ' TERM=xterm-256color bash --norc --noprofile" >/dev/null 2>&1
+  tmux -L am has-session -t "$SESSION" 2>/dev/null || exit 1
+  # The default status line is loud green chrome nobody reads; the pane is the whole window.
+  tmux -L am set-option -t "$SESSION" status off >/dev/null 2>&1 || true
+fi
+
+if ! terminal_window >/dev/null; then
+  # mkdir is atomic, so exactly one caller spawns the xterm and the rest just wait for it.
+  find "$LOCK" -maxdepth 0 -mmin +0.2 -exec rmdir {} + >/dev/null 2>&1 || true
+  if mkdir "$LOCK" 2>/dev/null && ! terminal_window >/dev/null; then
+    nohup xterm -geometry 110x30-0-44 -bg "#111113" -fg "#E8E8EA" -cr "#E8E8EA" -fa Monospace -fs 10 \
+      -title "Terminal" -e tmux -L am attach -t "$SESSION" >/tmp/authoritymax/xterm-"$NUM".log 2>&1 &
+  fi
+  for _ in $(seq 1 60); do
+    terminal_window >/dev/null && break
+    sleep 0.1
+  done
+  rmdir "$LOCK" 2>/dev/null || true
+fi
+
+TTY="$(tmux -L am display -p -t "$SESSION" '#{pane_tty}' 2>/dev/null || true)"
+if [ -z "$TTY" ] || [ ! -w "$TTY" ]; then exit 1; fi
+printf '%s' "$TTY" > "$CACHE"
+printf '%s\n' "$TTY"

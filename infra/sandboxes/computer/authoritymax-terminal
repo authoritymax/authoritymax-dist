@@ -1,0 +1,16 @@
+#!/bin/sh
+# Launcher entry: make sure the display's terminal exists, then raise it.
+set -u
+authoritymax-terminal-tty "${DISPLAY:-:1}" >/dev/null 2>&1 || exit 1
+# xdotool search takes one pattern, so the title is checked per XTerm window here too.
+win=""
+for candidate in $(xdotool search --class '^XTerm$' 2>/dev/null); do
+  if [ "$(xdotool getwindowname "$candidate" 2>/dev/null)" = "Terminal" ]; then
+    win="$candidate"
+    break
+  fi
+done
+[ -n "$win" ] || exit 1
+# The window may be minimized, which windowactivate alone does not always undo.
+xdotool windowmap "$win" >/dev/null 2>&1
+exec xdotool windowactivate --sync "$win"
