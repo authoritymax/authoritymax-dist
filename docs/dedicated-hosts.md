@@ -179,6 +179,38 @@ Switching back to GHCR is just restoring `DEDICATED_HOST_IMAGE_REPOSITORY` and r
   `DEDICATED_HOST_MAX_HOSTS` so a signup wave cannot exhaust the account. Contabo cancels at the end
   of the contract period; deprovisioning stops the instance immediately and files the cancellation.
 
+## Egress proxy
+
+Sites score a datacenter address heavily, so a host can send everything its bot computers do out
+through one upstream proxy — typically a static ISP address rented for that account with the host's
+public IP allowlisted at the proxy. This is a host-level switch for now: one proxy per host, set over
+SSH. (Per-workspace configuration and automatic allocation through a proxy vendor's API are planned;
+they will feed the same `egress.env` file, so nothing here needs to change on the host.)
+
+How it works: the supervisor names every bot's bridge `amc-<hash>`, and
+`infra/dedicated-host/authoritymax-egress` installs iptables rules that redirect all TCP those
+bridges send to public addresses into a local `redsocks` (Debian package), which relays through the
+proxy. UDP and everything else bound for public addresses is dropped, so QUIC, WebRTC, and a proxy
+outage cannot leak the host's own address (a failure stops traffic rather than exposing the host).
+Private ranges and the WireGuard tunnel bypass the proxy. Nothing inside a container is configured;
+Chrome and shell tools see ordinary TCP. DNS still resolves through the host's resolver.
+
+```sh
+scp infra/dedicated-host/authoritymax-egress deploy@HOST:/tmp/
+ssh deploy@HOST sudo bash /tmp/authoritymax-egress install
+# then, as root on the host:
+printf 'EGRESS_PROXY_URL=http://PROXY_IP:PORT\n' > /etc/authoritymax/egress.env   # or socks5://…
+authoritymax-egress apply
+authoritymax-egress status
+authoritymax-egress check authoritymax-bot-<bot-id>   # prints the address seen from inside
+```
+
+A bot network created before this change lacks the bridge name; the supervisor recreates it — and
+that bot's container — on the next provision (the home directory persists, so the browser profile
+survives). Hosts must run a supervisor image that includes this change first. `authoritymax-egress
+clear` (or an empty `EGRESS_PROXY_URL` followed by `apply`) removes every rule and returns to direct
+egress. The proxy address is a secret in `/etc/authoritymax/egress.env` (mode 0600); do not commit it.
+
 ## Security
 
 - Supervisor and screen traffic never leave the WireGuard tunnel. Hosts expose only UDP 51820 (and
