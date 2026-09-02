@@ -5,8 +5,10 @@ computers run there instead of on the control plane, using the same Debian 13 co
 sandbox supervisor as a local Docker deployment. The control plane keeps the API, worker, Postgres,
 and the web app; each dedicated host only runs computers.
 
-The VPS vendor sits behind the `ComputeHostProvider` contract. Contabo is the first
-implementation; nothing outside `packages/adapters/src/contabo-*.ts` knows its API.
+The VPS vendor sits behind the `ComputeHostProvider` contract. `COMPUTE_HOST_PROVIDER=contabo | box`
+selects which one new hosts use; nothing outside `packages/adapters/src/contabo-*.ts` or
+`packages/adapters/src/box-*.ts` knows either vendor's API. See [Box-hosted dedicated
+hosts](./box-hosts.md) for the box-specific configuration, lifecycle, and template.
 
 ## How it works
 
@@ -81,7 +83,7 @@ These two must be set together: `COMPUTE_HOST_PROVIDER` is ignored, and no VPS i
 
 ```env
 SANDBOX_PROVIDER=dedicated-host
-COMPUTE_HOST_PROVIDER=contabo            # contabo | fake | empty (dedicated hosts disabled)
+COMPUTE_HOST_PROVIDER=contabo            # contabo | box | fake | empty (dedicated hosts disabled)
 
 CONTABO_CLIENT_ID=
 CONTABO_CLIENT_SECRET=
@@ -92,9 +94,15 @@ CONTABO_PRODUCT_ID=                      # product id of the 8 GB Cloud VPS tier
 CONTABO_IMAGE_ID=                        # optional; defaults to the standard Debian 13 image
 CONTABO_SSH_KEY_SECRET_IDS=              # optional comma-separated Contabo secret ids
 
+BOX_API_KEY=                             # see docs/box-hosts.md
+BOX_API_URL=                             # optional; defaults to https://ascii.dev/api/box/v1
+BOX_HOST_TEMPLATE=                       # optional named snapshot; unset = base image
+BOX_HOST_SIZE=default                    # small | default | large
+
 DEDICATED_HOST_WG_PUBLIC_KEY=
 DEDICATED_HOST_WG_ENDPOINT=
 DEDICATED_HOST_TUNNEL_CIDR=10.77.0.0/16
+DEDICATED_HOST_TUNNEL_CIDR_<KIND>=       # per-provider tunnel range override, e.g. DEDICATED_HOST_TUNNEL_CIDR_BOX; required for box. The range check covers every provider with credentials present, so a deployment with BOX_API_KEY set refuses to start without DEDICATED_HOST_TUNNEL_CIDR_BOX, even with COMPUTE_HOST_PROVIDER=contabo.
 DEDICATED_HOST_PEER_DIR=                 # default $DATA_DIR/wireguard/peers
 DEDICATED_HOST_IMAGE_REPOSITORY=ghcr.io/authoritymax/authoritymax-dist
 DEDICATED_HOST_IMAGE_TAG=edge
@@ -102,6 +110,7 @@ DEDICATED_HOST_ALLOW_SSH=0
 DEDICATED_HOST_SSH_AUTHORIZED_KEYS=       # optional comma-separated public keys for operator SSH
 DEDICATED_HOST_MAX_HOSTS=
 DEDICATED_HOST_PROVISION_TIMEOUT_MS=1800000
+DEDICATED_HOST_WAKE_TIMEOUT_MS=90000     # box only: how long a wake may take before the host resets to asleep
 ```
 
 Contabo's API credential is the client id and secret from the Customer Control Panel plus the API
@@ -118,6 +127,9 @@ VPS tier in your Contabo catalog (product ids look like `V…`).
 `DEDICATED_HOST_IMAGE_REPOSITORY` / `DEDICATED_HOST_IMAGE_TAG` select the published `computer` and
 `supervisor` images the host pulls. A fork publishes into its own GHCR namespace; point the
 repository there. The packages must be pullable anonymously (public) or the host cannot start.
+
+`COMPUTE_HOST_PROVIDER=box` provisions hosts on box (ascii.dev) instead; see [Box-hosted dedicated
+hosts](./box-hosts.md) for `BOX_*` configuration, the sleep/wake lifecycle, and the template.
 
 `COMPUTE_HOST_PROVIDER=fake` provisions in-memory hosts for development and tests; nothing is
 created anywhere.
@@ -157,7 +169,8 @@ Switching back to GHCR is just restoring `DEDICATED_HOST_IMAGE_REPOSITORY` and r
 
 ## Operations
 
-- **Status.** `dedicated_hosts.status` moves `pending → provisioning → ready`; `error` keeps
+- **Status.** `dedicated_hosts.status` moves `pending → provisioning → ready ⇄ asleep (via waking)`;
+  `asleep`/`waking` only apply to providers that support sleep and resume (box); `error` keeps
   `last_error`. Retry from Account settings or `dedicatedHost.retry`; a retry creates a new VM and
   abandons the failed one after stopping and cancelling it. A host that ends in `error` is
   **stopped, not cancelled**, so you can still inspect it — which means it keeps billing until it is

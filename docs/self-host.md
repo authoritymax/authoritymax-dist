@@ -44,6 +44,13 @@ SANDBOX_IDLE_MS=600000    # pause the bot computer after 10 minutes idle
 SANDBOX_IDLE_MS_BOX=180000            # idle tail for Box computers (per-second billing)
 SANDBOX_IDLE_MS_DEDICATED_HOST=       # idle tail for dedicated-host computers; defaults to SANDBOX_IDLE_MS
 # All three idle tails have a 30-second floor: a smaller value is ignored and the default applies.
+COMPUTE_HOST_PROVIDER=                # contabo | box | fake; see docs/dedicated-hosts.md and docs/box-hosts.md
+BOX_API_KEY=                          # when COMPUTE_HOST_PROVIDER=box
+BOX_API_URL=                          # optional; defaults to https://ascii.dev/api/box/v1
+BOX_HOST_TEMPLATE=                    # optional named snapshot; unset = base image
+BOX_HOST_SIZE=default                 # small | default | large
+DEDICATED_HOST_TUNNEL_CIDR_BOX=       # per-provider tunnel range; required for box, must not overlap 10.77.0.0/16
+DEDICATED_HOST_WAKE_TIMEOUT_MS=90000  # box only: how long a wake may take before the host resets to asleep
 COMPUTER_LEASE_WAIT_MS=30000          # how long a tool waits for a busy team computer before the run is requeued
 SANDBOX_COMMAND_TIMEOUT_MS=300000 # stop a shell command after 5 minutes
 # Time limits below are optional (defaults shown, 0 disables): they stop a run from
