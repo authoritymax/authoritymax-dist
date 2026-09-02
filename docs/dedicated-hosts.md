@@ -192,6 +192,40 @@ Switching back to GHCR is just restoring `DEDICATED_HOST_IMAGE_REPOSITORY` and r
   `DEDICATED_HOST_MAX_HOSTS` so a signup wave cannot exhaust the account. Contabo cancels at the end
   of the contract period; deprovisioning stops the instance immediately and files the cancellation.
 
+### Moving a workspace to another provider
+
+A workspace has exactly one host row, and the row's `provider` column decides which vendor serves
+it, so a workspace provisioned on one provider (say Contabo) stays there after
+`COMPUTE_HOST_PROVIDER` changes. `scripts/host-migrate.ts` moves it to the current default provider
+while keeping its data:
+
+```sh
+pnpm tsx scripts/host-migrate.ts --workspace <workspace id>            # dry run: prints the plan
+pnpm tsx scripts/host-migrate.ts --workspace <workspace id> --execute  # applies it
+```
+
+It needs the worker's environment (`DATABASE_URL`, `ENCRYPTION_KEY`, the dedicated-host and
+compute-provider variables). Preconditions, checked before anything changes: the host is `ready`,
+`asleep`, or `error`; every computer in the workspace is `stopped`, `suspended`, or `error` (its home
+is then already checkpointed on the control plane), nobody holds control of one, no run is active
+on one, and no execution lease is live. Otherwise the script names the blocker and exits; wait for
+the idle sleep, or use "Recover computer", and run it again.
+
+What `--execute` does, in order: re-points the host row at the default provider and resets it to
+`pending` with every instance-bound field cleared (the row keeps its id and tunnel index, so it gets
+the same index in the new provider's tunnel range, fresh WireGuard material, and a new supervisor
+token); drops each computer's container reference so its next use provisions on the new host and
+restores from the checkpoint (the same path "Recover computer" takes); withdraws the old tunnel
+peer; queues provisioning. An existing `WorkspaceEgress` row follows on its own — the new host gets
+the proxy at bootstrap, and the ready hook queues a sync. An egress IP configured by hand on the old
+host has to be adopted with `scripts/egress-adopt.ts` once the new host is ready (a box host's public
+address changes on every wake, so the vendor item must authenticate by login and password, not by
+host IP).
+
+The old instance is **detached, not cancelled**: it keeps running and billing at its vendor. The
+script prints its provider, instance id, and address; cancel it in the vendor console once the new
+host is confirmed working.
+
 ## Egress proxy
 
 Sites score a datacenter address heavily, so a host can send everything its bot computers do out
