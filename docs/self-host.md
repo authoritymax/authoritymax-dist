@@ -41,6 +41,10 @@ SANDBOX_PROVIDER=docker   # or e2b, daytona, box. Keep fake only for pnpm test.
 AGENT_RUNTIME=pi          # Keep scripted only for pnpm test.
 WAKEUP_DRIVER=graphile
 SANDBOX_IDLE_MS=600000    # pause the bot computer after 10 minutes idle
+SANDBOX_IDLE_MS_BOX=180000            # idle tail for Box computers (per-second billing)
+SANDBOX_IDLE_MS_DEDICATED_HOST=       # idle tail for dedicated-host computers; defaults to SANDBOX_IDLE_MS
+# All three idle tails have a 30-second floor: a smaller value is ignored and the default applies.
+COMPUTER_LEASE_WAIT_MS=30000          # how long a tool waits for a busy team computer before the run is requeued
 SANDBOX_COMMAND_TIMEOUT_MS=300000 # stop a shell command after 5 minutes
 # Time limits below are optional (defaults shown, 0 disables): they stop a run from
 # staying "working" forever when a model or the computer stops answering.
@@ -537,7 +541,7 @@ To run a hosted product (same codebase):
 2. Provision managed Postgres 16 and run `pnpm db:migrate`.
 3. Run **API** and **worker** as always-on Node 22 services (Fly machines, a VM, ECS, k8s). Not lambda-style request handlers.
 4. Persist and back up `DATA_DIR` (bot homes, browser profiles, artifacts). Today the concrete store is a local filesystem (`LocalAgentHomeStore`), so attach an AuthorityMax-owned durable volume shared by API and worker processes. The storage contract is separate from the computer-provider contract, but an object-storage implementation is not wired yet.
-5. Choose computers: **`SANDBOX_PROVIDER=e2b`**, `daytona`, or `box` with the matching provider key for a public or multi-user production service. Each Team or Private Computer reconnects to its sandbox id (`providerRef`), while workspace state is checkpointed outside the provider at run completion, explicit stop, and idle suspension. If that sandbox is gone—or the deployment changes providers—the replacement is hydrated from AuthorityMax's copy. Idle computers pause after `SANDBOX_IDLE_MS` (default 10 minutes) and resume on the next message or Take control. Docker remains the local and trusted single-machine default.
+5. Choose computers: **`SANDBOX_PROVIDER=e2b`**, `daytona`, or `box` with the matching provider key for a public or multi-user production service. Each Team or Private Computer reconnects to its sandbox id (`providerRef`), while workspace state is checkpointed outside the provider at run completion, explicit stop, and idle suspension. If that sandbox is gone—or the deployment changes providers—the replacement is hydrated from AuthorityMax's copy. A run only provisions its computer once a computer-bound tool runs or the bot requests a takeover; chat and integration turns never boot one. Idle computers pause after `SANDBOX_IDLE_MS` (default 10 minutes) and resume on the next message or Take control; Box computers use the shorter `SANDBOX_IDLE_MS_BOX` (default 3 minutes) to limit per-second billing, and dedicated-host computers use `SANDBOX_IDLE_MS_DEDICATED_HOST` (defaults to `SANDBOX_IDLE_MS`). All three have a 30-second floor: anything below it is treated as unset and the default applies, so a computer is never torn down mid-boot. Docker remains the local and trusted single-machine default.
 6. A Hetzner CX22 (2 vCPU / 4 GB) is enough for API + worker + Postgres when E2B owns the desktops. 2 GB works for a quiet box; 8 GB is only needed if you also run Docker computers on that same machine.
 7. Set public HTTPS `WEB_ORIGIN` / `BETTER_AUTH_URL` / `API_URL`, secrets, and an OpenRouter (or other Pi) deployment key if you want to skip per-user model keys.
 8. Put the web app behind the same origin as `/api` and `/rpc` (Vite preview proxy, or a reverse proxy). Docker noVNC connections use short-lived signed `/novnc/*` capabilities; do not replace that route with an unrestricted port proxy.
