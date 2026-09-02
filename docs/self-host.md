@@ -67,6 +67,7 @@ MODEL_RESPONSE_TIMEOUT_MS=90000   # model must answer with response headers in t
 RUN_IDLE_TIMEOUT_MS=600000        # fail a turn after 10 minutes with no model activity
 RUN_MAX_DURATION_MS=7200000       # hard ceiling on one run attempt (2 hours)
 SANDBOX_REQUEST_TIMEOUT_MS=30000  # supervisor control calls (files, input, stop)
+SANDBOX_TRANSFER_TIMEOUT_MS=600000 # one whole-workspace checkpoint or restore; a 2 GB home over a dedicated-host tunnel takes about 6 minutes
 SANDBOX_PROVISION_TIMEOUT_MS=120000 # provisioning: image pull, container start, screen
 SANDBOX_SCREEN_TIMEOUT_MS=20000   # observe/screen calls; action batches add their waits
 SANDBOX_EXEC_GRACE_MS=15000       # added to a command's timeout for the exec round trip
