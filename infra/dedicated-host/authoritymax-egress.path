@@ -1,0 +1,9 @@
+[Unit]
+Description=Re-apply AuthorityMax egress when its config changes
+
+[Path]
+PathChanged=/etc/authoritymax/egress.env
+Unit=authoritymax-egress-apply.service
+
+[Install]
+WantedBy=multi-user.target

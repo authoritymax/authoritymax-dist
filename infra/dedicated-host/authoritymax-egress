@@ -14,22 +14,32 @@
 #
 #   authoritymax-egress install          install redsocks + the systemd unit (idempotent)
 #   authoritymax-egress apply            validate egress.env, write redsocks.conf, start the service
+#   authoritymax-egress apply-or-clear   apply when egress.env names a proxy, clear when it does not
 #   authoritymax-egress clear            stop the service and remove every rule (direct egress again)
 #   authoritymax-egress status           show config, service state, and whether rules are present
 #   authoritymax-egress check [container] show the address the proxy presents; with a bot container
 #                                        name, also the address seen from inside that container
+#   authoritymax-egress record-status    probe the proxy and rewrite egress.status (the unit runs it)
 #
-# `rules` and `unrules` are called by the unit itself. Set AUTHORITYMAX_EGRESS_DRY_RUN=1 to print the
-# commands instead of running them (used by the tests).
+# `apply` and `clear` record their outcome in /etc/authoritymax/egress.status, one JSON object the
+# supervisor reads back: {"ok":true,"presentedIp":…} or {"ok":false,"error":…}, each with
+# "checkedAt". The unit re-records it after every service start (a reboot, a resumed box), so a
+# status from before a stop never outlives the stop. Credentials in the URL are RFC 3986
+# percent-encoded (`%40` for @, `%3A` for :). `rules`, `unrules`, and `record-status` are called by
+# the unit itself. Set AUTHORITYMAX_EGRESS_DRY_RUN=1 to print the commands instead of running them
+# (used by the tests).
 
 set -euo pipefail
 
 CONFIG="${AUTHORITYMAX_EGRESS_CONFIG:-/etc/authoritymax/egress.env}"
 REDSOCKS_CONFIG="${AUTHORITYMAX_EGRESS_REDSOCKS_CONFIG:-/etc/authoritymax/redsocks.conf}"
+STATUS_PATH="${AUTHORITYMAX_EGRESS_STATUS:-/etc/authoritymax/egress.status}"
 UNIT_PATH="/etc/systemd/system/authoritymax-egress.service"
 INSTALL_PATH="/usr/local/sbin/authoritymax-egress"
 SERVICE="authoritymax-egress"
 DRY_RUN="${AUTHORITYMAX_EGRESS_DRY_RUN:-0}"
+# What the address probe answers in dry-run mode, so the tests never touch the network.
+DRY_RUN_IP="${AUTHORITYMAX_EGRESS_DRY_RUN_IP:-198.51.100.1}"
 
 # Must match COMPUTER_BRIDGE_PREFIX in infra/sandboxes/supervisor/src/computer-spec.ts.
 BRIDGE_PREFIX="amc"
@@ -45,9 +55,24 @@ EGRESS_PROXY_URL=""
 EGRESS_BYPASS_CIDRS=""
 EGRESS_REDIRECT_PORT="12345"
 
+# The reason for the exit, for the status file when an apply dies before its probe.
+FAIL_MESSAGE=""
+# Set while `apply` runs: any non-zero exit in that window is recorded as its outcome, so a stale
+# ok from an earlier proxy never outlives a failed apply.
+RECORD_APPLY_FAILURE=0
+
 fail() {
+  FAIL_MESSAGE="$*"
   echo "authoritymax-egress: $*" >&2
   exit 1
+}
+
+on_exit() {
+  local code=$?
+  if (( code != 0 )) && [[ "$RECORD_APPLY_FAILURE" == 1 ]]; then
+    write_status error "${FAIL_MESSAGE:-apply failed with exit status ${code}}" || true
+  fi
+  exit "$code"
 }
 
 run() {
@@ -101,10 +126,17 @@ PROXY_PORT=""
 PROXY_LOGIN=""
 PROXY_PASSWORD=""
 
-# Accepts http://[user:pass@]ipv4:port and socks5://[user:pass@]ipv4:port. The host must be an
-# IPv4 literal: redsocks relays by address, and an IP-allowlisted proxy is addressed that way anyway.
-# The config uses the classic local_ip/local_port/ip/port keys: Debian's redsocks 0.5 rejects the
-# newer bind/relay form.
+# RFC 3986 percent-decoding: `%40` → `@`, `%3A` → `:`, `%25` → `%`; anything else is left alone
+# (`+` stays `+`, as in userinfo). Backslashes are doubled first so %b cannot read them as escapes.
+url_decode() {
+  local encoded="${1//\\/\\\\}"
+  printf '%b' "${encoded//%/\\x}"
+}
+
+# Accepts http://[user:pass@]ipv4:port and socks5://[user:pass@]ipv4:port, credentials
+# percent-encoded. The host must be an IPv4 literal: redsocks relays by address, and an
+# IP-allowlisted proxy is addressed that way anyway. The config uses the classic
+# local_ip/local_port/ip/port keys: Debian's redsocks 0.5 rejects the newer bind/relay form.
 parse_proxy_url() {
   local url="$1" rest auth hostport
   [[ "$url" =~ ^(http|socks5)://(.+)$ ]] || fail "EGRESS_PROXY_URL must look like http://IP:PORT or socks5://IP:PORT"
@@ -119,7 +151,13 @@ parse_proxy_url() {
     PROXY_LOGIN="${auth%%:*}"
     PROXY_PASSWORD="${auth#*:}"
     [[ -n "$PROXY_LOGIN" && "$auth" == *:* ]] || fail "EGRESS_PROXY_URL credentials must be user:password"
-    [[ "$PROXY_LOGIN$PROXY_PASSWORD" != *'"'* ]] || fail "EGRESS_PROXY_URL credentials must not contain double quotes"
+    [[ "${auth//%[0-9A-Fa-f][0-9A-Fa-f]/}" != *%* ]] || fail "EGRESS_PROXY_URL credentials contain a malformed percent-escape"
+    PROXY_LOGIN="$(url_decode "$PROXY_LOGIN")"
+    PROXY_PASSWORD="$(url_decode "$PROXY_PASSWORD")"
+    # The decoded values land inside redsocks' double-quoted strings.
+    [[ "$PROXY_LOGIN$PROXY_PASSWORD" != *'"'* && "$PROXY_LOGIN$PROXY_PASSWORD" != *'\'* ]] ||
+      fail "EGRESS_PROXY_URL credentials must not contain double quotes or backslashes"
+    [[ ! "$PROXY_LOGIN$PROXY_PASSWORD" =~ [[:cntrl:]] ]] || fail "EGRESS_PROXY_URL credentials must not contain control characters"
   else
     hostport="$rest"
   fi
@@ -183,6 +221,7 @@ Wants=network-online.target
 Type=simple
 ExecStartPre=${INSTALL_PATH} rules
 ExecStart=/usr/sbin/redsocks -c ${REDSOCKS_CONFIG}
+ExecStartPost=-${INSTALL_PATH} record-status
 ExecStopPost=${INSTALL_PATH} unrules
 Restart=always
 RestartSec=2
@@ -281,6 +320,61 @@ rules_present() {
   iptables -t nat -C PREROUTING -i "${BRIDGE_PREFIX}+" -j "$NAT_CHAIN" >/dev/null 2>&1
 }
 
+# Escapes one value for a JSON string: backslashes and quotes, with line breaks flattened and any
+# other control character dropped.
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/ }"
+  value="${value//$'\r'/ }"
+  value="${value//$'\t'/ }"
+  printf '%s' "$value" | tr -d '\000-\037'
+}
+
+# Prints the address the proxy presents to the outside world.
+probe_proxy_ip() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%s\n' "$DRY_RUN_IP"
+    return 0
+  fi
+  curl -4 -fsS --max-time 20 -x "$EGRESS_PROXY_URL" https://api.ipify.org
+}
+
+# Records the outcome of the last apply or clear where the supervisor can read it. Written next to
+# egress.env and renamed into place, so a reader never sees a partial object.
+write_status() {
+  local kind="$1" detail="$2" now tmp
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  install -m 0755 -d "$(dirname "$STATUS_PATH")"
+  tmp="$(mktemp "${STATUS_PATH}.XXXXXX")"
+  if [[ "$kind" == ok ]]; then
+    printf '{"ok":true,"presentedIp":"%s","checkedAt":"%s"}\n' "$(json_escape "$detail")" "$now" > "$tmp"
+  else
+    printf '{"ok":false,"error":"%s","checkedAt":"%s"}\n' "$(json_escape "$detail")" "$now" > "$tmp"
+  fi
+  chmod 0644 "$tmp"
+  mv "$tmp" "$STATUS_PATH"
+}
+
+# Probes the proxy and records what it presents. A failed probe is recorded, not fatal: the rules
+# are in place and fail closed, and the supervisor reports the error from the status file.
+record_check() {
+  local answer
+  if answer="$(probe_proxy_ip 2>&1)"; then
+    if valid_ipv4 "$answer"; then
+      write_status ok "$answer"
+      echo "status: ok ${answer}"
+      return 0
+    fi
+    answer="unexpected answer from the address probe: ${answer:0:200}"
+  else
+    answer="proxy probe failed: ${answer:0:200}"
+  fi
+  write_status error "$answer"
+  echo "status: error (${answer})" >&2
+}
+
 cmd_install() {
   [[ "$(id -u)" == 0 ]] || fail "install must run as root"
   if ! command -v redsocks >/dev/null 2>&1; then
@@ -302,6 +396,8 @@ cmd_install() {
 }
 
 cmd_apply() {
+  RECORD_APPLY_FAILURE=1
+  trap on_exit EXIT
   load_config
   if [[ -z "$EGRESS_PROXY_URL" ]]; then
     echo "EGRESS_PROXY_URL is empty; egress stays direct"
@@ -312,6 +408,7 @@ cmd_apply() {
   if [[ "$DRY_RUN" == "1" ]]; then
     render_redsocks_config
     apply_rules
+    record_check
     return
   fi
   [[ -f "$UNIT_PATH" ]] || fail "unit missing; run: authoritymax-egress install"
@@ -324,16 +421,29 @@ cmd_apply() {
   systemctl enable "$SERVICE" >/dev/null 2>&1 || true
   systemctl restart "$SERVICE"
   echo "egress via ${PROXY_TYPE} ${PROXY_HOST}:${PROXY_PORT} for bridges ${BRIDGE_PREFIX}-*"
+  record_check
 }
 
 cmd_clear() {
   if [[ "$DRY_RUN" == "1" ]]; then
     remove_rules
+    write_status error unconfigured
     return
   fi
   systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
   remove_rules
+  write_status error unconfigured
   echo "egress rules removed; bot computers use the host address directly"
+}
+
+# Run by the unit after every start: the rules are already in place, so only the probe is redone and
+# its answer recorded. A failed probe is recorded like any other (record_check never fails), and the
+# unit ignores this command's exit status either way, so a reporting problem never stops egress.
+cmd_record_status() {
+  load_config
+  [[ -n "$EGRESS_PROXY_URL" ]] || fail "EGRESS_PROXY_URL is not set"
+  validate_config
+  record_check
 }
 
 cmd_status() {
@@ -347,6 +457,7 @@ cmd_status() {
   echo "service: $(systemctl is-active "$SERVICE" 2>/dev/null || echo inactive)"
   if rules_present; then echo "rules: present"; else echo "rules: absent"; fi
   echo "bridges: $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep "^${BRIDGE_PREFIX}-" | tr '\n' ' ')"
+  if [[ -f "$STATUS_PATH" ]]; then echo "last check: $(cat "$STATUS_PATH")"; fi
 }
 
 cmd_check() {
@@ -355,7 +466,7 @@ cmd_check() {
   validate_config
   local direct via
   direct="$(curl -4 -fsS --max-time 10 https://api.ipify.org || echo unreachable)"
-  via="$(curl -4 -fsS --max-time 20 -x "$EGRESS_PROXY_URL" https://api.ipify.org || echo unreachable)"
+  via="$(probe_proxy_ip 2>/dev/null || echo unreachable)"
   echo "host direct address: $direct"
   echo "through proxy:       $via"
   if [[ -n "${1:-}" ]]; then
@@ -374,14 +485,16 @@ cmd_check() {
 
 case "${1:-}" in
   install) cmd_install ;;
-  apply) cmd_apply ;;
+  # `apply` already clears when egress.env names no proxy; the apply unit calls it by the explicit name.
+  apply|apply-or-clear) cmd_apply ;;
   clear) cmd_clear ;;
   status) cmd_status ;;
   check) cmd_check "${2:-}" ;;
   rules) load_config; validate_config; apply_rules ;;
   unrules) remove_rules ;;
+  record-status) cmd_record_status ;;
   *)
-    sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,31p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

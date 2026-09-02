@@ -195,12 +195,14 @@ Switching back to GHCR is just restoring `DEDICATED_HOST_IMAGE_REPOSITORY` and r
 ## Egress proxy
 
 Sites score a datacenter address heavily, so a host can send everything its bot computers do out
-through one upstream proxy — typically a static ISP address rented for that account with the host's
-public IP allowlisted at the proxy. This is a host-level switch for now: one proxy per host, set over
-SSH. (Per-workspace configuration and automatic allocation through a proxy vendor's API are planned;
-they will feed the same `egress.env` file, so nothing here needs to change on the host.)
+through one upstream proxy — typically a static ISP address rented for that account. Since the
+workspace egress feature shipped, this is automatic and per-workspace: every new host installs the
+egress script and units at bootstrap, and the worker pushes and renews a proxy for the workspace's
+own country as part of allocating its `WorkspaceEgress` row. See [Workspace egress
+IPs](./egress.md) for the full lifecycle (allocation, verification, renewal, release) and the
+environment variables that turn it on (`EGRESS_PROVIDER`, `PROXY_SELLER_API_KEY`, and friends).
 
-How it works: the supervisor names every bot's bridge `amc-<hash>`, and
+How it works on the host: the supervisor names every bot's bridge `amc-<hash>`, and
 `infra/dedicated-host/authoritymax-egress` installs iptables rules that redirect all TCP those
 bridges send to public addresses into a local `redsocks` (Debian package), which relays through the
 proxy. UDP and everything else bound for public addresses is dropped, so QUIC, WebRTC, and a proxy
@@ -208,21 +210,21 @@ outage cannot leak the host's own address (a failure stops traffic rather than e
 Private ranges and the WireGuard tunnel bypass the proxy. Nothing inside a container is configured;
 Chrome and shell tools see ordinary TCP. DNS still resolves through the host's resolver.
 
-```sh
-scp infra/dedicated-host/authoritymax-egress deploy@HOST:/tmp/
-ssh deploy@HOST sudo bash /tmp/authoritymax-egress install
-# then, as root on the host:
-printf 'EGRESS_PROXY_URL=http://PROXY_IP:PORT\n' > /etc/authoritymax/egress.env   # or socks5://…
-authoritymax-egress apply
-authoritymax-egress status
-authoritymax-egress check authoritymax-bot-<bot-id>   # prints the address seen from inside
-```
+`authoritymax-egress install` runs at bootstrap on every new host, and `authoritymax-egress.path`
+(a systemd path unit) is enabled so any later rewrite of `/etc/authoritymax/egress.env` — by the
+worker's `PUT /egress` call to the supervisor, or by hand — re-applies the rules automatically.
+`authoritymax-egress status` shows the current config and whether the rules are present;
+`authoritymax-egress check authoritymax-bot-<bot-id>` prints the address seen from inside a bot's
+container. The proxy's credentials live in `/etc/authoritymax/egress.env` (mode 0600, root-only) and
+are never committed or logged.
 
-A bot network created before this change lacks the bridge name; the supervisor recreates it — and
-that bot's container — on the next provision (the home directory persists, so the browser profile
-survives). Hosts must run a supervisor image that includes this change first. `authoritymax-egress
-clear` (or an empty `EGRESS_PROXY_URL` followed by `apply`) removes every rule and returns to direct
-egress. The proxy address is a secret in `/etc/authoritymax/egress.env` (mode 0600); do not commit it.
+### Hosts provisioned before automation
+
+A host provisioned before the workspace egress feature shipped has neither the current
+`authoritymax-egress` script nor a supervisor image that answers `PUT`/`GET /egress`. Bringing one up
+to date, and adopting an egress IP ordered by hand for its workspace in the meantime, is an operator
+runbook in [Workspace egress IPs](./egress.md#operator-runbook-a-dedicated-host-provisioned-before-this-change)
+rather than a manual SSH proxy setup.
 
 ## Security
 

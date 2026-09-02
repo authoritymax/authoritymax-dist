@@ -51,6 +51,14 @@ BOX_HOST_TEMPLATE=                    # optional named snapshot; unset = base im
 BOX_HOST_SIZE=default                 # small | default | large
 DEDICATED_HOST_TUNNEL_CIDR_BOX=       # per-provider tunnel range; required for box, must not overlap 10.77.0.0/16
 DEDICATED_HOST_WAKE_TIMEOUT_MS=90000  # box only: how long a wake may take before the host resets to asleep
+EGRESS_PROVIDER=                      # proxy-seller | fake; unset disables per-workspace egress IPs, see docs/egress.md
+PROXY_SELLER_API_KEY=                 # required when EGRESS_PROVIDER=proxy-seller
+EGRESS_PERIOD_ID=1m                   # vendor billing period for new allocations
+EGRESS_DEFAULT_COUNTRY=US             # ordered when an org has no country, or its country is out of stock
+EGRESS_VERIFY_URL=https://api.ipify.org            # fetched through the proxy; must answer with the caller's IP as plain text
+EGRESS_GEO_URL=https://ipinfo.io/{ip}/json          # {ip} is replaced; JSON answer must carry country (alpha-2), may carry org
+EGRESS_RENEW_BEFORE_MS=259200000      # renew an allocation when this close to expiry (default: 3 days)
+EGRESS_ORDER_TIMEOUT_MS=7200000       # give up on an undelivered vendor order after this long (default: 2 hours)
 COMPUTER_LEASE_WAIT_MS=30000          # how long a tool waits for a busy team computer before the run is requeued
 SANDBOX_COMMAND_TIMEOUT_MS=300000 # stop a shell command after 5 minutes
 # Time limits below are optional (defaults shown, 0 disables): they stop a run from

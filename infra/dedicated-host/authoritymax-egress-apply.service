@@ -1,0 +1,8 @@
+[Unit]
+Description=Apply the AuthorityMax egress config
+After=network-online.target docker.service ufw.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/authoritymax-egress apply-or-clear
