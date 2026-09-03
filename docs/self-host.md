@@ -52,6 +52,7 @@ BOX_HOST_SIZE=default                 # small | default | large
 DEDICATED_HOST_TUNNEL_CIDR_BOX=       # per-provider tunnel range; required for box, must not overlap 10.77.0.0/16
 DEDICATED_HOST_WAKE_TIMEOUT_MS=90000  # box only: how long a wake may take before the host resets to asleep
 DEDICATED_HOST_SLEEP_SETTLE_MS=300000 # delay between the last computer suspending and the host sleeping. Default 5 minutes, floor 5 seconds.
+DEDICATED_HOST_PRESENCE_TAIL_MS=900000 # host stays awake this long after the last presence beat from the app (default 900000 = 15 min, floor 60000)
 EGRESS_PROVIDER=                      # proxy-seller | fake; unset disables per-workspace egress IPs, see docs/egress.md
 PROXY_SELLER_API_KEY=                 # required when EGRESS_PROVIDER=proxy-seller
 EGRESS_PERIOD_ID=1m                   # vendor billing period for new allocations
