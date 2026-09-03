@@ -21,13 +21,24 @@
 #                                        name, also the address seen from inside that container
 #   authoritymax-egress record-status    probe the proxy and rewrite egress.status (the unit runs it)
 #
-# `apply` and `clear` record their outcome in /etc/authoritymax/egress.status, one JSON object the
-# supervisor reads back: {"ok":true,"presentedIp":…} or {"ok":false,"error":…}, each with
-# "checkedAt". The unit re-records it after every service start (a reboot, a resumed box), so a
-# status from before a stop never outlives the stop. Credentials in the URL are RFC 3986
-# percent-encoded (`%40` for @, `%3A` for :). `rules`, `unrules`, and `record-status` are called by
-# the unit itself. Set AUTHORITYMAX_EGRESS_DRY_RUN=1 to print the commands instead of running them
-# (used by the tests).
+# egress.env keys:
+#   EGRESS_PROXY_URL          http://[user:pass@]IPV4:PORT or socks5://[user:pass@]IPV4:PORT
+#   EGRESS_BYPASS_CIDRS       extra IPv4 ranges that never go through the proxy (space-separated)
+#   EGRESS_REDIRECT_PORT      port redsocks listens on for redirected TCP (default 12345)
+#   EGRESS_MAX_CONNECTIONS    cap on simultaneous upstream tunnels for an http proxy (default 90)
+#   EGRESS_GOVERNOR_PORT      loopback port of the connection governor redsocks dials (default 12346)
+#   EGRESS_QUEUE_TIMEOUT_MS   how long a tunnel may wait for a free slot before 503 (default 30000)
+#
+# For an http proxy, redsocks does not dial the vendor itself: it dials the connection governor
+# (authoritymax-egress-governor, a python3 program installed next to this script), which queues
+# tunnels above EGRESS_MAX_CONNECTIONS instead of letting the vendor refuse them with 429, and adds
+# the credentials. socks5 proxies are dialed directly. `apply` and `clear` record their outcome in
+# /etc/authoritymax/egress.status, one JSON object the supervisor reads back:
+# {"ok":true,"presentedIp":…} or {"ok":false,"error":…}, each with "checkedAt". The unit re-records
+# it after every service start (a reboot, a resumed box), so a status from before a stop never
+# outlives the stop. Credentials in the URL are RFC 3986 percent-encoded (`%40` for @, `%3A` for :).
+# `rules`, `unrules`, and `record-status` are called by the unit itself. Set
+# AUTHORITYMAX_EGRESS_DRY_RUN=1 to print the commands instead of running them (used by the tests).
 
 set -euo pipefail
 
@@ -37,6 +48,11 @@ STATUS_PATH="${AUTHORITYMAX_EGRESS_STATUS:-/etc/authoritymax/egress.status}"
 UNIT_PATH="/etc/systemd/system/authoritymax-egress.service"
 INSTALL_PATH="/usr/local/sbin/authoritymax-egress"
 SERVICE="authoritymax-egress"
+GOVERNOR_SERVICE="authoritymax-egress-governor"
+GOVERNOR_UNIT_PATH="/etc/systemd/system/${GOVERNOR_SERVICE}.service"
+GOVERNOR_INSTALL_PATH="/usr/local/sbin/authoritymax-egress-governor"
+# Written by the governor (RuntimeDirectory of its unit); shown by `status`.
+GOVERNOR_STATS="/run/authoritymax-egress/governor.json"
 DRY_RUN="${AUTHORITYMAX_EGRESS_DRY_RUN:-0}"
 # What the address probe answers in dry-run mode, so the tests never touch the network.
 DRY_RUN_IP="${AUTHORITYMAX_EGRESS_DRY_RUN_IP:-198.51.100.1}"
@@ -54,6 +70,9 @@ DEFAULT_BYPASS="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 127.0.0.0/8 169.254.0.0/
 EGRESS_PROXY_URL=""
 EGRESS_BYPASS_CIDRS=""
 EGRESS_REDIRECT_PORT="12345"
+EGRESS_MAX_CONNECTIONS="90"
+EGRESS_GOVERNOR_PORT="12346"
+EGRESS_QUEUE_TIMEOUT_MS="30000"
 
 # The reason for the exit, for the status file when an apply dies before its probe.
 FAIL_MESSAGE=""
@@ -81,6 +100,16 @@ run() {
     printf '\n'
   else
     "$@"
+  fi
+}
+
+# A systemctl call whose failure is tolerated (a unit already enabled, a governor never started); in
+# dry-run mode the command is printed like any other.
+quiet_run() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    run "$@"
+  else
+    "$@" >/dev/null 2>&1 || true
   fi
 }
 
@@ -118,6 +147,11 @@ valid_cidr() {
 
 valid_port() {
   [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( $1 >= 1 && $1 <= 65535 ))
+}
+
+# A non-negative decimal integer of sane size; the caller checks the range.
+valid_int() {
+  [[ "$1" =~ ^[0-9]{1,9}$ ]]
 }
 
 PROXY_TYPE=""
@@ -172,6 +206,10 @@ validate_config() {
   [[ -n "$EGRESS_PROXY_URL" ]] || fail "EGRESS_PROXY_URL is not set in $CONFIG"
   parse_proxy_url "$EGRESS_PROXY_URL"
   valid_port "$EGRESS_REDIRECT_PORT" || fail "EGRESS_REDIRECT_PORT is out of range"
+  valid_port "$EGRESS_GOVERNOR_PORT" || fail "EGRESS_GOVERNOR_PORT is out of range"
+  [[ "$EGRESS_GOVERNOR_PORT" != "$EGRESS_REDIRECT_PORT" ]] || fail "EGRESS_GOVERNOR_PORT must differ from EGRESS_REDIRECT_PORT"
+  valid_int "$EGRESS_MAX_CONNECTIONS" && (( EGRESS_MAX_CONNECTIONS >= 1 )) || fail "EGRESS_MAX_CONNECTIONS must be an integer of at least 1"
+  valid_int "$EGRESS_QUEUE_TIMEOUT_MS" && (( EGRESS_QUEUE_TIMEOUT_MS >= 1000 )) || fail "EGRESS_QUEUE_TIMEOUT_MS must be an integer of at least 1000"
   local cidr
   for cidr in $EGRESS_BYPASS_CIDRS; do
     valid_cidr "$cidr" || fail "EGRESS_BYPASS_CIDRS entry '$cidr' is not an IPv4 CIDR"
@@ -184,6 +222,9 @@ bypass_list() {
   printf '\n'
 }
 
+# An http proxy is reached through the governor on loopback, which adds the credentials and caps
+# the number of simultaneous tunnels; redsocks itself never sees the vendor or the login. A socks5
+# proxy is dialed directly, credentials and all.
 render_redsocks_config() {
   cat <<EOF
 base {
@@ -197,15 +238,25 @@ base {
 redsocks {
   local_ip = 0.0.0.0;
   local_port = ${EGRESS_REDIRECT_PORT};
+EOF
+  if [[ "$PROXY_TYPE" == http-connect ]]; then
+    cat <<EOF
+  ip = 127.0.0.1;
+  port = ${EGRESS_GOVERNOR_PORT};
+  type = http-connect;
+EOF
+  else
+    cat <<EOF
   ip = ${PROXY_HOST};
   port = ${PROXY_PORT};
   type = ${PROXY_TYPE};
 EOF
-  if [[ -n "$PROXY_LOGIN" ]]; then
-    cat <<EOF
+    if [[ -n "$PROXY_LOGIN" ]]; then
+      cat <<EOF
   login = "${PROXY_LOGIN}";
   password = "${PROXY_PASSWORD}";
 EOF
+    fi
   fi
   echo "}"
 }
@@ -214,8 +265,8 @@ render_unit() {
   cat <<EOF
 [Unit]
 Description=AuthorityMax egress proxy for bot computers
-After=network-online.target docker.service ufw.service
-Wants=network-online.target
+After=network-online.target docker.service ufw.service ${GOVERNOR_SERVICE}.service
+Wants=network-online.target ${GOVERNOR_SERVICE}.service
 
 [Service]
 Type=simple
@@ -229,6 +280,41 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+
+# The governor reads the same egress.env; it exits 0 on its own for an empty or socks5 URL, so
+# Restart=on-failure never loops it.
+render_governor_unit() {
+  cat <<EOF
+[Unit]
+Description=AuthorityMax egress connection governor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=${CONFIG}
+RuntimeDirectory=authoritymax-egress
+ExecStart=/usr/bin/python3 ${GOVERNOR_INSTALL_PATH}
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# Enables the units and (re)starts them in dependency order: the governor must be listening before
+# redsocks relays its first tunnel. A socks5 proxy needs no governor, so it is stopped and disabled.
+start_services() {
+  if [[ "$PROXY_TYPE" == http-connect ]]; then
+    quiet_run systemctl enable "$GOVERNOR_SERVICE" "$SERVICE"
+    run systemctl restart "$GOVERNOR_SERVICE"
+  else
+    quiet_run systemctl disable --now "$GOVERNOR_SERVICE"
+    quiet_run systemctl enable "$SERVICE"
+  fi
+  run systemctl restart "$SERVICE"
 }
 
 ensure_chain() {
@@ -385,7 +471,16 @@ record_check() {
 }
 
 cmd_install() {
+  if [[ "$DRY_RUN" == "1" ]]; then
+    render_unit
+    echo
+    render_governor_unit
+    return
+  fi
   [[ "$(id -u)" == 0 ]] || fail "install must run as root"
+  [[ -f "$GOVERNOR_INSTALL_PATH" ]] ||
+    fail "governor missing: copy infra/dedicated-host/authoritymax-egress-governor to ${GOVERNOR_INSTALL_PATH} (mode 0755) first"
+  command -v python3 >/dev/null 2>&1 || fail "python3 is required for ${GOVERNOR_SERVICE}"
   if ! command -v redsocks >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends redsocks iptables
   fi
@@ -396,10 +491,11 @@ cmd_install() {
   fi
   install -m 0755 -d "$(dirname "$CONFIG")"
   if [[ ! -f "$CONFIG" ]]; then
-    printf '# EGRESS_PROXY_URL=http://IP:PORT   (or socks5://IP:PORT; user:pass@ allowed)\n# EGRESS_BYPASS_CIDRS="203.0.113.7/32"\n# EGRESS_REDIRECT_PORT=12345\n' > "$CONFIG"
+    printf '# EGRESS_PROXY_URL=http://IP:PORT   (or socks5://IP:PORT; user:pass@ allowed)\n# EGRESS_BYPASS_CIDRS="203.0.113.7/32"\n# EGRESS_REDIRECT_PORT=12345\n# EGRESS_MAX_CONNECTIONS=90\n# EGRESS_GOVERNOR_PORT=12346\n# EGRESS_QUEUE_TIMEOUT_MS=30000\n' > "$CONFIG"
     chmod 0600 "$CONFIG"
   fi
   render_unit > "$UNIT_PATH"
+  render_governor_unit > "$GOVERNOR_UNIT_PATH"
   systemctl daemon-reload
   echo "installed; set EGRESS_PROXY_URL in $CONFIG and run: authoritymax-egress apply"
 }
@@ -417,29 +513,36 @@ cmd_apply() {
   if [[ "$DRY_RUN" == "1" ]]; then
     render_redsocks_config
     apply_rules
+    start_services
     record_check
     return
   fi
-  [[ -f "$UNIT_PATH" ]] || fail "unit missing; run: authoritymax-egress install"
+  [[ -f "$UNIT_PATH" && -f "$GOVERNOR_UNIT_PATH" ]] || fail "unit missing; run: authoritymax-egress install"
+  if [[ "$PROXY_TYPE" == http-connect ]]; then
+    [[ -f "$GOVERNOR_INSTALL_PATH" ]] || fail "governor missing at ${GOVERNOR_INSTALL_PATH}; run: authoritymax-egress install"
+  fi
   local tmp
   tmp="$(mktemp "${REDSOCKS_CONFIG}.XXXXXX")"
   render_redsocks_config > "$tmp"
   chmod 0600 "$tmp"
   redsocks -t -c "$tmp" || { rm -f "$tmp"; fail "redsocks rejected the generated config"; }
   mv "$tmp" "$REDSOCKS_CONFIG"
-  systemctl enable "$SERVICE" >/dev/null 2>&1 || true
-  systemctl restart "$SERVICE"
-  echo "egress via ${PROXY_TYPE} ${PROXY_HOST}:${PROXY_PORT} for bridges ${BRIDGE_PREFIX}-*"
+  start_services
+  if [[ "$PROXY_TYPE" == http-connect ]]; then
+    echo "egress via ${PROXY_TYPE} ${PROXY_HOST}:${PROXY_PORT} (governed, at most ${EGRESS_MAX_CONNECTIONS} tunnels) for bridges ${BRIDGE_PREFIX}-*"
+  else
+    echo "egress via ${PROXY_TYPE} ${PROXY_HOST}:${PROXY_PORT} for bridges ${BRIDGE_PREFIX}-*"
+  fi
   record_check
 }
 
 cmd_clear() {
+  quiet_run systemctl disable --now "$SERVICE" "$GOVERNOR_SERVICE"
   if [[ "$DRY_RUN" == "1" ]]; then
     remove_rules
     write_status error unconfigured
     return
   fi
-  systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
   remove_rules
   write_status error unconfigured
   echo "egress rules removed; bot computers use the host address directly"
@@ -464,6 +567,8 @@ cmd_status() {
     echo "proxy: (unset)"
   fi
   echo "service: $(systemctl is-active "$SERVICE" 2>/dev/null || echo inactive)"
+  echo "governor: $(systemctl is-active "$GOVERNOR_SERVICE" 2>/dev/null || echo inactive)"
+  if [[ -f "$GOVERNOR_STATS" ]]; then echo "governor stats: $(cat "$GOVERNOR_STATS")"; fi
   if rules_present; then echo "rules: present"; else echo "rules: absent"; fi
   echo "bridges: $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | grep "^${BRIDGE_PREFIX}-" | tr '\n' ' ')"
   if [[ -f "$STATUS_PATH" ]]; then echo "last check: $(cat "$STATUS_PATH")"; fi
@@ -503,7 +608,7 @@ case "${1:-}" in
   unrules) remove_rules ;;
   record-status) cmd_record_status ;;
   *)
-    sed -n '3,31p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,41p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

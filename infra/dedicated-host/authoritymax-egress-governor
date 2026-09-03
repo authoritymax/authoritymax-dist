@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+# Queue the bot computers' outbound tunnels behind a cap the upstream proxy tolerates.
+#
+# redsocks on this host turns every redirected TCP connection into an HTTP CONNECT. Sent straight
+# to the upstream proxy, a page that opens a hundred connections at once gets a burst of
+# "429 Too Many Requests" from the vendor, and the sites behind them fail to load. This program
+# listens on the loopback address redsocks dials instead, holds each CONNECT until one of a bounded
+# number of upstream slots is free, and only then opens the tunnel through the real proxy, adding
+# the credentials from EGRESS_PROXY_URL. Nothing else changes: bytes are spliced through as they
+# are, and a stopped governor means refused tunnels, never a direct exit through the host address.
+#
+# The cap adapts: it starts at EGRESS_MAX_CONNECTIONS, shrinks by a tenth (never below 20) on
+# every upstream 429, and grows back one slot per minute without one. A refused tunnel is retried
+# three times (0.5 s, 1 s, 2 s) while its slot is held before the 429 reaches the client.
+#
+# Configuration comes from /etc/authoritymax/egress.env through the unit's EnvironmentFile:
+#
+#   EGRESS_PROXY_URL          http://[user:pass@]IPV4:PORT, credentials percent-encoded; empty or
+#                             socks5:// exits 0 without listening (redsocks dials socks5 directly)
+#   EGRESS_MAX_CONNECTIONS    upper bound on simultaneous upstream tunnels (default 90)
+#   EGRESS_GOVERNOR_PORT      loopback port redsocks dials (default 12346)
+#   EGRESS_QUEUE_TIMEOUT_MS   how long a tunnel may wait for a slot before 503 (default 30000)
+#
+# Counters are written to /run/authoritymax-egress/governor.json every ten seconds (path
+# overridable with EGRESS_GOVERNOR_STATS) for `authoritymax-egress status`. Standard library only;
+# runs on the python3 of Ubuntu 24.04 and Debian 12/13.
+
+import asyncio
+import base64
+import json
+import os
+import signal
+import sys
+import time
+from typing import Dict, Optional, Tuple
+from urllib.parse import unquote, urlsplit
+
+HEAD_LIMIT = 8 * 1024
+HEAD_TIMEOUT = 10.0
+DIAL_TIMEOUT = 20.0
+SPLICE_CHUNK = 64 * 1024
+LIMIT_FLOOR = 20
+RETRY_BACKOFF = (0.5, 1.0, 2.0)
+GROW_INTERVAL = 60.0
+STATS_INTERVAL = 10.0
+LOG_INTERVAL = 60.0
+
+REASONS = {
+    400: "Bad Request",
+    429: "Too Many Requests",
+    502: "Bad Gateway",
+    503: "Service Unavailable",
+    504: "Gateway Timeout",
+}
+
+
+def log(message: str) -> None:
+    sys.stderr.write("authoritymax-egress-governor: " + message + "\n")
+    sys.stderr.flush()
+
+
+class RateLimitedLog:
+    """One line per key per second: a burst of 429s must not flood the journal."""
+
+    def __init__(self) -> None:
+        self.last: Dict[str, float] = {}
+        self.suppressed: Dict[str, int] = {}
+
+    def emit(self, key: str, message: str) -> None:
+        now = time.monotonic()
+        if now - self.last.get(key, -1.0) < 1.0:
+            self.suppressed[key] = self.suppressed.get(key, 0) + 1
+            return
+        self.last[key] = now
+        dropped = self.suppressed.pop(key, 0)
+        if dropped:
+            message += " (+%d similar in the last second)" % dropped
+        log(message)
+
+
+def env_int(name: str, default: int, minimum: int, maximum: Optional[int] = None) -> int:
+    raw = os.environ.get(name, "").strip()
+    if raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise SystemExit("%s must be an integer, got %r" % (name, raw))
+    if value < minimum or (maximum is not None and value > maximum):
+        raise SystemExit("%s is out of range: %d" % (name, value))
+    return value
+
+
+class Upstream:
+    def __init__(self, host: str, port: int, auth: Optional[str]) -> None:
+        self.host = host
+        self.port = port
+        self.auth = auth
+
+    @staticmethod
+    def parse(url: str) -> Optional["Upstream"]:
+        """None when the governor has nothing to do: no proxy, or a socks5 one."""
+        if url == "":
+            return None
+        parts = urlsplit(url)
+        if parts.scheme == "socks5":
+            return None
+        if parts.scheme != "http":
+            raise SystemExit("EGRESS_PROXY_URL must be http:// or socks5://")
+        try:
+            port = parts.port
+        except ValueError:
+            raise SystemExit("EGRESS_PROXY_URL port is out of range")
+        if not parts.hostname or port is None:
+            raise SystemExit("EGRESS_PROXY_URL needs a host and a port")
+        auth = None
+        if parts.username is not None:
+            user = unquote(parts.username)
+            password = unquote(parts.password or "")
+            auth = base64.b64encode((user + ":" + password).encode("utf-8")).decode("ascii")
+        return Upstream(parts.hostname, port, auth)
+
+    def connect_request(self, target: str) -> bytes:
+        lines = ["CONNECT %s HTTP/1.1" % target, "Host: %s" % target]
+        if self.auth is not None:
+            lines.append("Proxy-Authorization: Basic " + self.auth)
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
+
+
+class Limiter:
+    """A counted set of upstream slots whose size moves with the vendor's answers."""
+
+    def __init__(self, maximum: int, logger: RateLimitedLog) -> None:
+        self.maximum = maximum
+        self.limit = maximum
+        self.active = 0
+        self.cond = asyncio.Condition()
+        self.logger = logger
+        self.last_refusal = 0.0
+        self.last_growth = time.monotonic()
+        # Counters for the journal and the stats file.
+        self.high_water = 0
+        self.tunnels = 0
+        self.waits = 0
+        self.queue_timeouts = 0
+        self.refusals = 0
+        self.traffic_since_log = False
+
+    async def acquire(self, timeout: float) -> bool:
+        started = time.monotonic()
+        deadline = started + timeout
+        queued = False
+        async with self.cond:
+            while self.active >= self.limit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.queue_timeouts += 1
+                    return False
+                queued = True
+                try:
+                    await asyncio.wait_for(self.cond.wait(), remaining)
+                except asyncio.TimeoutError:
+                    pass
+            self.active += 1
+            self.tunnels += 1
+            self.traffic_since_log = True
+            if self.active > self.high_water:
+                self.high_water = self.active
+        if queued:
+            self.waits += 1
+        waited = time.monotonic() - started
+        if waited > 1.0:
+            self.logger.emit(
+                "wait", "tunnel waited %.1f s for a slot (limit %d)" % (waited, self.limit)
+            )
+        return True
+
+    async def release(self) -> None:
+        async with self.cond:
+            self.active -= 1
+            self.cond.notify()
+
+    def shrink(self) -> None:
+        """One step down per second at most: a burst of refusals is one event, not a hundred."""
+        self.refusals += 1
+        now = time.monotonic()
+        if now - self.last_refusal < 1.0:
+            self.last_refusal = now
+            return
+        self.last_refusal = now
+        new_limit = max(LIMIT_FLOOR, self.limit - max(1, self.limit // 10))
+        if new_limit != self.limit:
+            self.limit = new_limit
+            self.logger.emit("limit", "upstream refused a tunnel; limit now %d" % self.limit)
+
+    async def grow_when_quiet(self) -> None:
+        now = time.monotonic()
+        since = now - max(self.last_refusal, self.last_growth)
+        if since < GROW_INTERVAL:
+            return
+        self.last_growth = now
+        if self.limit >= self.maximum:
+            return
+        async with self.cond:
+            self.limit += 1
+            self.cond.notify()
+        self.logger.emit("limit", "no refusal for a minute; limit now %d" % self.limit)
+
+    def snapshot(self) -> Dict[str, object]:
+        return {
+            "limit": self.limit,
+            "max": self.maximum,
+            "active": self.active,
+            "highWater": self.high_water,
+            "tunnels": self.tunnels,
+            "waits": self.waits,
+            "queueTimeouts": self.queue_timeouts,
+            "refusals": self.refusals,
+            "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+
+def write_stats(path: str, limiter: Limiter) -> None:
+    """Best effort: a stats file nobody can write must not stop the tunnels."""
+    try:
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(limiter.snapshot(), handle)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def close_writer(writer: Optional[asyncio.StreamWriter]) -> None:
+    if writer is None:
+        return
+    try:
+        writer.close()
+    except Exception:
+        pass
+
+
+async def reply(writer: asyncio.StreamWriter, status: int, reason: Optional[str] = None) -> None:
+    text = reason if reason else REASONS.get(status, "Error")
+    try:
+        writer.write(("HTTP/1.1 %d %s\r\n\r\n" % (status, text)).encode("ascii", "replace"))
+        await writer.drain()
+    except (ConnectionError, OSError):
+        pass
+
+
+def parse_connect(head: bytes) -> Optional[str]:
+    """The target of a well-formed CONNECT request line, else None."""
+    try:
+        request_line = head.split(b"\r\n", 1)[0].decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    parts = request_line.split(" ")
+    if len(parts) != 3 or parts[0] != "CONNECT" or not parts[2].startswith("HTTP/1."):
+        return None
+    target = parts[1]
+    host, sep, port = target.rpartition(":")
+    if not sep or not host or not port.isdigit() or not 1 <= int(port) <= 65535:
+        return None
+    return target
+
+
+def parse_status(head: bytes) -> Tuple[int, str]:
+    status_line = head.split(b"\r\n", 1)[0].decode("latin-1")
+    parts = status_line.split(" ", 2)
+    if len(parts) < 2 or not parts[0].startswith("HTTP/") or not parts[1].isdigit():
+        raise ValueError("malformed status line")
+    code = int(parts[1])
+    reason = parts[2].strip() if len(parts) == 3 else ""
+    return code, reason or REASONS.get(code, "")
+
+
+async def pipe(source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> None:
+    try:
+        while True:
+            data = await source.read(SPLICE_CHUNK)
+            if not data:
+                return
+            sink.write(data)
+            await sink.drain()
+    except (ConnectionError, OSError):
+        return
+
+
+async def splice(
+    client_reader: asyncio.StreamReader,
+    client_writer: asyncio.StreamWriter,
+    upstream_reader: asyncio.StreamReader,
+    upstream_writer: asyncio.StreamWriter,
+) -> None:
+    """Both directions until either side closes; whatever the upstream already buffered goes too."""
+    tasks = [
+        asyncio.ensure_future(pipe(client_reader, upstream_writer)),
+        asyncio.ensure_future(pipe(upstream_reader, client_writer)),
+    ]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+class Governor:
+    def __init__(
+        self, upstream: Upstream, limiter: Limiter, queue_timeout: float, logger: RateLimitedLog
+    ) -> None:
+        self.upstream = upstream
+        self.limiter = limiter
+        self.queue_timeout = queue_timeout
+        self.logger = logger
+        self.connections = set()  # type: set
+
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        self.connections.add(task)
+        try:
+            await self.serve(reader, writer)
+        except Exception as error:  # a bug in one tunnel must not take the listener down
+            self.logger.emit("error", "tunnel failed: %r" % (error,))
+        finally:
+            self.connections.discard(task)
+            close_writer(writer)
+
+    async def shutdown(self) -> None:
+        tasks = list(self.connections)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), HEAD_TIMEOUT)
+        except (asyncio.TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            await reply(writer, 400)
+            return
+        except (ConnectionError, OSError):
+            return
+        target = parse_connect(head)
+        if target is None:
+            await reply(writer, 400)
+            return
+        if not await self.limiter.acquire(self.queue_timeout):
+            await reply(writer, 503)
+            return
+        try:
+            await self.tunnel(target, reader, writer)
+        finally:
+            await self.limiter.release()
+
+    async def open_upstream(
+        self, target: str
+    ) -> Tuple[int, str, Optional[asyncio.StreamReader], Optional[asyncio.StreamWriter]]:
+        """The upstream's answer to one CONNECT; the streams stay open only for a 2xx."""
+        upstream_writer = None
+        try:
+            upstream_reader, upstream_writer = await asyncio.wait_for(
+                asyncio.open_connection(self.upstream.host, self.upstream.port, limit=HEAD_LIMIT),
+                DIAL_TIMEOUT,
+            )
+            upstream_writer.write(self.upstream.connect_request(target))
+            await upstream_writer.drain()
+            head = await asyncio.wait_for(upstream_reader.readuntil(b"\r\n\r\n"), DIAL_TIMEOUT)
+            code, reason = parse_status(head)
+        except asyncio.TimeoutError:
+            close_writer(upstream_writer)
+            return 504, REASONS[504], None, None
+        except (ConnectionError, OSError, asyncio.IncompleteReadError, ValueError):
+            close_writer(upstream_writer)
+            return 502, REASONS[502], None, None
+        if 200 <= code < 300:
+            return code, reason, upstream_reader, upstream_writer
+        close_writer(upstream_writer)
+        return code, reason, None, None
+
+    async def tunnel(
+        self, target: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        attempt = 0
+        while True:
+            code, reason, upstream_reader, upstream_writer = await self.open_upstream(target)
+            if upstream_reader is not None and upstream_writer is not None:
+                break
+            if code == 429:
+                self.limiter.shrink()
+                if attempt < len(RETRY_BACKOFF):
+                    delay = RETRY_BACKOFF[attempt]
+                    attempt += 1
+                    self.logger.emit(
+                        "retry",
+                        "upstream answered 429; retry %d of %d in %.1f s"
+                        % (attempt, len(RETRY_BACKOFF), delay),
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+            await reply(writer, code, reason)
+            return
+        try:
+            writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            await writer.drain()
+        except (ConnectionError, OSError):
+            close_writer(upstream_writer)
+            return
+        try:
+            await splice(reader, writer, upstream_reader, upstream_writer)
+        finally:
+            close_writer(upstream_writer)
+            try:
+                # The slot is released only once the upstream has seen the close, so the next
+                # tunnel never overlaps the one it replaces at the vendor.
+                await asyncio.wait_for(upstream_writer.wait_closed(), 5.0)
+            except Exception:
+                pass
+
+
+async def maintenance(limiter: Limiter, stats_path: str, stop: asyncio.Event) -> None:
+    last_stats = time.monotonic()
+    last_log = time.monotonic()
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), 1.0)
+        except asyncio.TimeoutError:
+            pass
+        await limiter.grow_when_quiet()
+        now = time.monotonic()
+        if now - last_stats >= STATS_INTERVAL:
+            last_stats = now
+            write_stats(stats_path, limiter)
+        if now - last_log >= LOG_INTERVAL:
+            last_log = now
+            if limiter.traffic_since_log or limiter.active > 0:
+                limiter.traffic_since_log = False
+                log(
+                    "stats: active %d, high-water %d, tunnels %d, waits %d, queue timeouts %d, "
+                    "refusals %d, limit %d"
+                    % (
+                        limiter.active,
+                        limiter.high_water,
+                        limiter.tunnels,
+                        limiter.waits,
+                        limiter.queue_timeouts,
+                        limiter.refusals,
+                        limiter.limit,
+                    )
+                )
+    write_stats(stats_path, limiter)
+
+
+async def main() -> int:
+    upstream = Upstream.parse(os.environ.get("EGRESS_PROXY_URL", "").strip())
+    if upstream is None:
+        log("no http proxy configured; nothing to govern")
+        return 0
+    maximum = env_int("EGRESS_MAX_CONNECTIONS", 90, 1)
+    port = env_int("EGRESS_GOVERNOR_PORT", 12346, 1, 65535)
+    queue_timeout = env_int("EGRESS_QUEUE_TIMEOUT_MS", 30000, 1000) / 1000.0
+    stats_path = os.environ.get("EGRESS_GOVERNOR_STATS", "").strip() or (
+        "/run/authoritymax-egress/governor.json"
+    )
+
+    logger = RateLimitedLog()
+    limiter = Limiter(maximum, logger)
+    governor = Governor(upstream, limiter, queue_timeout, logger)
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(signum, stop.set)
+
+    write_stats(stats_path, limiter)
+    server = await asyncio.start_server(governor.handle, "127.0.0.1", port, limit=HEAD_LIMIT)
+    log(
+        "listening on 127.0.0.1:%d for upstream %s:%d; limit %d, queue timeout %d ms"
+        % (port, upstream.host, upstream.port, maximum, int(queue_timeout * 1000))
+    )
+    keeper = asyncio.ensure_future(maintenance(limiter, stats_path, stop))
+    try:
+        await stop.wait()
+    finally:
+        server.close()
+        # Open tunnels are cut on purpose: on Python 3.12+ wait_closed() would otherwise wait for
+        # every client to hang up before the unit could stop.
+        await governor.shutdown()
+        try:
+            await asyncio.wait_for(server.wait_closed(), 5.0)
+        except asyncio.TimeoutError:
+            pass
+        stop.set()
+        await keeper
+    log("stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

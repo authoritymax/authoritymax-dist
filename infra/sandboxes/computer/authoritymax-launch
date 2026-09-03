@@ -1,0 +1,45 @@
+#!/bin/sh
+# Starts a desktop program detached and waits, bounded, for its window: a bot's open/launch
+# action observes the screen right after, so on an empty desktop the first open would otherwise
+# return the wallpaper. Returns as soon as a new visible top-level window appears (and raises
+# it) or the program exits without one (an existing Chrome took the URL and its launcher
+# returned). Exit 0 either way; only a missing command is an error.
+# Usage: authoritymax-launch <command> [args...]   (needs $DISPLAY)
+set -u
+if [ "$#" -lt 1 ]; then
+  echo "usage: authoritymax-launch <command> [args...]" >&2
+  exit 2
+fi
+LOG_DIR="${AUTHORITYMAX_LAUNCH_LOG_DIR:-/tmp/authoritymax}"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/launch-${DISPLAY#:}.log"
+BEFORE="$(mktemp)"
+NOW="$(mktemp)"
+trap 'rm -f "$BEFORE" "$NOW"' EXIT
+xdotool search --onlyvisible --name '.' 2>/dev/null | sort > "$BEFORE"
+# Detached in its own session so the program outlives this script and the exec that ran it.
+# (setsid is util-linux; the tests run the script where it may be absent.)
+if command -v setsid >/dev/null 2>&1; then
+  setsid "$@" </dev/null >>"$LOG" 2>&1 &
+else
+  "$@" </dev/null >>"$LOG" 2>&1 &
+fi
+PID=$!
+i=0
+while [ "$i" -lt 40 ]; do
+  xdotool search --onlyvisible --name '.' 2>/dev/null | sort > "$NOW"
+  # grep -v with an empty pattern file matches nothing, so an empty "before" set passes everything.
+  if [ -s "$BEFORE" ]; then
+    win="$(grep -vxF -f "$BEFORE" "$NOW" | head -n1)"
+  else
+    win="$(head -n1 "$NOW")"
+  fi
+  if [ -n "$win" ]; then
+    xdotool windowactivate --sync "$win" >/dev/null 2>&1 || true
+    exit 0
+  fi
+  kill -0 "$PID" 2>/dev/null || exit 0
+  sleep 0.25
+  i=$((i + 1))
+done
+exit 0
