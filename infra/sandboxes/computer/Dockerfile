@@ -1,7 +1,7 @@
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb x11vnc fluxbox xterm tmux xdotool x11-utils x11-xserver-utils \
-    imagemagick novnc websockify python3 ca-certificates curl gnupg procps bash tar \
+    imagemagick novnc websockify python3 ca-certificates curl gnupg procps bash tar tzdata \
     pcmanfm tint2 hsetroot adwaita-icon-theme-legacy xdg-utils shared-mime-info desktop-file-utils file \
     fonts-liberation fonts-dejavu-core fonts-noto-core fonts-noto-color-emoji \
     fonts-freefont-ttf fonts-crosextra-carlito fonts-crosextra-caladea \
@@ -45,6 +45,7 @@ RUN convert -size 1280x800 radial-gradient:'#1c2033'-'#0f1016' /usr/share/author
        /usr/share/authoritymax/wallpaper-glyph.png
 COPY start.sh /usr/local/bin/authoritymax-computer
 COPY authoritymax-browser /usr/local/bin/authoritymax-browser
+COPY authoritymax-browser-keep /usr/local/bin/authoritymax-browser-keep
 COPY authoritymax-terminal-tty /usr/local/bin/authoritymax-terminal-tty
 COPY authoritymax-terminal /usr/local/bin/authoritymax-terminal
 COPY authoritymax-browser.desktop authoritymax-files.desktop authoritymax-terminal.desktop /usr/share/applications/
@@ -55,10 +56,10 @@ COPY fluxbox.apps /etc/authoritymax/fluxbox/apps
 COPY fluxbox.menu /etc/authoritymax/fluxbox/menu
 COPY embed.html /usr/share/novnc/embed.html
 # Strip CR so shebangs work even if the build context came from a CRLF checkout.
-RUN sed -i 's/\r$//' /usr/local/bin/authoritymax-computer /usr/local/bin/authoritymax-browser \
+RUN sed -i 's/\r$//' /usr/local/bin/authoritymax-computer /usr/local/bin/authoritymax-browser /usr/local/bin/authoritymax-browser-keep \
     /usr/local/bin/authoritymax-terminal-tty /usr/local/bin/authoritymax-terminal /etc/authoritymax/tint2rc \
     /etc/authoritymax/fluxbox/init /etc/authoritymax/fluxbox/apps /etc/authoritymax/fluxbox/menu \
-  && chmod +x /usr/local/bin/authoritymax-computer /usr/local/bin/authoritymax-browser \
+  && chmod +x /usr/local/bin/authoritymax-computer /usr/local/bin/authoritymax-browser /usr/local/bin/authoritymax-browser-keep \
     /usr/local/bin/authoritymax-terminal-tty /usr/local/bin/authoritymax-terminal \
   && update-desktop-database /usr/share/applications
 EXPOSE 6080 6081 6082 6083 6084 6085 6086 6087 6088 6089 6090 6091 6092 6093 6094 6095

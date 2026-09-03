@@ -60,7 +60,9 @@ mkdir -p "$AGENT_HOME/.browser-profiles/chromium"
 rm -f "$AGENT_HOME/.browser-profiles/chromium/SingletonLock" \
   "$AGENT_HOME/.browser-profiles/chromium/SingletonCookie" \
   "$AGENT_HOME/.browser-profiles/chromium/SingletonSocket"
-HOME="$AGENT_HOME" authoritymax-browser >/tmp/authoritymax/browser.log 2>&1 &
+# The supervisor's per-call browser liveness check matches this exact launch line
+# (display, then the profile flag) to tell a live keep loop from a dead one.
+HOME="$AGENT_HOME" authoritymax-browser-keep :1 --user-data-dir="$AGENT_HOME/.browser-profiles/chromium" >/tmp/authoritymax/browser.log 2>&1 &
 browser_up=0
 for _ in $(seq 1 60); do
   for cls in chromium Chromium Google-chrome google-chrome; do

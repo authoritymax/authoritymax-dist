@@ -51,6 +51,7 @@ BOX_HOST_TEMPLATE=                    # optional named snapshot; unset = base im
 BOX_HOST_SIZE=default                 # small | default | large
 DEDICATED_HOST_TUNNEL_CIDR_BOX=       # per-provider tunnel range; required for box, must not overlap 10.77.0.0/16
 DEDICATED_HOST_WAKE_TIMEOUT_MS=90000  # box only: how long a wake may take before the host resets to asleep
+DEDICATED_HOST_SLEEP_SETTLE_MS=300000 # delay between the last computer suspending and the host sleeping. Default 5 minutes, floor 5 seconds.
 EGRESS_PROVIDER=                      # proxy-seller | fake; unset disables per-workspace egress IPs, see docs/egress.md
 PROXY_SELLER_API_KEY=                 # required when EGRESS_PROVIDER=proxy-seller
 EGRESS_PERIOD_ID=1m                   # vendor billing period for new allocations

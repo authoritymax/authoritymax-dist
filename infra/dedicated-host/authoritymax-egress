@@ -338,20 +338,29 @@ probe_proxy_ip() {
     printf '%s\n' "$DRY_RUN_IP"
     return 0
   fi
+  local container
+  container="$(docker ps -q --filter label=authoritymax.managed=true 2>/dev/null | head -1)"
+  if [[ -n "$container" ]]; then
+    # The real path: a bot's traffic through the bridge and the rules. The image has python3, no curl.
+    # Quiet and bounded: a traceback on stderr must not join the fallback's answer, and a wedged
+    # exec must not hold the sync.
+    timeout 30 docker exec "$container" python3 -c 'import urllib.request; print(urllib.request.urlopen("https://api.ipify.org", timeout=20).read().decode())' 2>/dev/null && return 0
+  fi
   curl -4 -fsS --max-time 20 -x "$EGRESS_PROXY_URL" https://api.ipify.org
 }
 
 # Records the outcome of the last apply or clear where the supervisor can read it. Written next to
 # egress.env and renamed into place, so a reader never sees a partial object.
 write_status() {
-  local kind="$1" detail="$2" now tmp
+  local kind="$1" detail="$2" now tmp boot
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
   install -m 0755 -d "$(dirname "$STATUS_PATH")"
   tmp="$(mktemp "${STATUS_PATH}.XXXXXX")"
   if [[ "$kind" == ok ]]; then
-    printf '{"ok":true,"presentedIp":"%s","checkedAt":"%s"}\n' "$(json_escape "$detail")" "$now" > "$tmp"
+    printf '{"ok":true,"presentedIp":"%s","checkedAt":"%s","bootId":"%s"}\n' "$(json_escape "$detail")" "$now" "$(json_escape "$boot")" > "$tmp"
   else
-    printf '{"ok":false,"error":"%s","checkedAt":"%s"}\n' "$(json_escape "$detail")" "$now" > "$tmp"
+    printf '{"ok":false,"error":"%s","checkedAt":"%s","bootId":"%s"}\n' "$(json_escape "$detail")" "$now" "$(json_escape "$boot")" > "$tmp"
   fi
   chmod 0644 "$tmp"
   mv "$tmp" "$STATUS_PATH"

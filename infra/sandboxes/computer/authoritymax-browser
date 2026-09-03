@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 AUTHORITYMAX_HOME="${HOME:-/home/authoritymax}"
-PROFILE="$AUTHORITYMAX_HOME/.browser-profiles/chromium"
+PROFILE="${AUTHORITYMAX_BROWSER_PROFILE:-$AUTHORITYMAX_HOME/.browser-profiles/chromium}"
 BIN=""
 for candidate in google-chrome-stable google-chrome chromium chromium-browser; do
   if BIN="$(command -v "$candidate" 2>/dev/null)"; then break; fi
@@ -24,6 +24,10 @@ set -- "$BIN" \
   --user-data-dir="$PROFILE" \
   --start-maximized \
   "$@"
+# The supervisor pins the egress country's language; --lang also seeds Accept-Language.
+if [ -n "${AUTHORITYMAX_BROWSER_LANG:-}" ]; then
+  set -- "$@" "--lang=$AUTHORITYMAX_BROWSER_LANG"
+fi
 # Print mode is a dry run for tests and callers that only need the argv: touch nothing.
 if [ "${AUTHORITYMAX_BROWSER_PRINT:-}" = "1" ]; then
   for arg in "$@"; do printf '%s\n' "$arg"; done
